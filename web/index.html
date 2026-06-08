@@ -1,0 +1,238 @@
+<!doctype html>
+<html lang="it">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Nasty RetroPixel</title>
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' fill='%23111125'/%3E%3Cpath d='M16 44V20h12c8 0 12 4 12 12s-4 12-12 12H16zm10-8h2c4 0 6-2 6-4s-2-4-6-4h-2v8z' fill='%23bf4bff'/%3E%3Cpath d='M40 44V20h8v24h-8z' fill='%234be3ff'/%3E%3C/svg%3E"
+    />
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <header class="header">
+      <div class="brand">
+        <div class="brandRow">
+          <div>
+            <h1>Nasty RetroPixel</h1>
+            <p>Recupera griglia, palette e leggibilita' da pixel art AI sporca o incoerente.</p>
+          </div>
+          <button id="openOptions" class="secondary">Opzioni</button>
+        </div>
+      </div>
+    </header>
+
+    <main class="container">
+      <section class="panel">
+        <div class="field">
+          <label>Immagine</label>
+          <div id="dropZone" class="dropZone" role="button" tabindex="0">
+            <div class="dropTitle">Trascina qui un file</div>
+            <div class="dropSub">oppure clicca per selezionare</div>
+          </div>
+          <input id="fileInput" type="file" accept="image/*" class="hidden" />
+        </div>
+
+        <div class="grid">
+          <div class="field">
+            <label for="kColors">Palette (k colori)</label>
+            <input id="kColors" type="number" min="1" max="256" step="1" value="16" />
+          </div>
+
+          <div class="field">
+            <label class="inline">
+              <input id="pixelOverrideEnabled" type="checkbox" />
+              Override pixel size
+            </label>
+            <input
+              id="pixelSize"
+              type="number"
+              min="1"
+              step="1"
+              value="8"
+              disabled
+            />
+          </div>
+        </div>
+
+        <div class="field">
+          <label for="zoom">Zoom anteprima</label>
+          <input id="zoom" type="range" min="1" max="12" value="1" />
+        </div>
+
+        <div class="actions">
+          <button id="processBtn" class="primary" disabled>Elabora</button>
+          <a id="downloadBtn" class="secondary disabled" href="#" download="nasty-retropixel.png"
+            >Scarica PNG</a
+          >
+          <button id="downloadAllBtn" class="secondary disabled">Scarica Tutto</button>
+        </div>
+
+        <div id="status" class="status">Carica un'immagine per iniziare.</div>
+      </section>
+
+      <section class="preview">
+        <div class="previewCard">
+          <h2>Originale</h2>
+          <div class="imageFrame">
+            <div class="imageWrap">
+              <img id="inputPreview" alt="Anteprima input" />
+              <canvas id="inputGridOverlay" class="gridOverlay"></canvas>
+            </div>
+          </div>
+        </div>
+        <div class="previewCard">
+          <h2>Output</h2>
+          <div class="imageFrame">
+            <img id="outputPreview" alt="Anteprima output" />
+          </div>
+        </div>
+        <div class="previewCard full">
+          <div class="compareHeader">
+            <h2>Confronto</h2>
+            <div class="compareTools">
+              <div id="compareLabel" class="compareLabel">50%</div>
+              <button id="compareReset" class="secondary small">Reset</button>
+              <button id="compareBlink" class="secondary small">Blink</button>
+            </div>
+          </div>
+          <div class="compareFrame" id="compareFrame">
+            <img id="compareOutput" alt="Confronto output" />
+            <div id="compareInputWrap" class="compareTop">
+              <img id="compareInput" alt="Confronto input" />
+            </div>
+            <div id="compareLine" class="compareLine"></div>
+            <div id="compareHandle" class="compareHandle" role="button" tabindex="0"></div>
+            <input id="compareSlider" class="compareSlider" type="range" min="0" max="100" value="50" />
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <footer class="footer">
+      <p>Powered by Nasty RetroPixel (Rust + WASM).</p>
+    </footer>
+
+    <div id="drawerOverlay" class="drawerOverlay hidden"></div>
+    <aside id="drawer" class="drawer hidden" aria-hidden="true">
+      <div class="drawerHeader">
+        <div class="drawerTitle">Opzioni avanzate</div>
+        <button id="closeOptions" class="secondary">Chiudi</button>
+      </div>
+
+      <div class="drawerBody">
+        <div class="drawerSection">
+          <div class="drawerSectionTitle">Workflow</div>
+          <label class="toggleRow">
+            <input id="batchMode" type="checkbox" />
+            Modalità batch (multi-file)
+          </label>
+        </div>
+
+        <div class="drawerSection">
+          <div class="drawerSectionTitle">Qualità</div>
+
+          <div class="field compact">
+            <label for="denoiseMode">Denoise (artefatti)</label>
+            <select id="denoiseMode">
+              <option value="0" selected>Off</option>
+              <option value="1">Box 3x3</option>
+            </select>
+          </div>
+
+          <div class="field compact">
+            <label for="paletteSource">Palette</label>
+            <select id="paletteSource">
+              <option value="1" selected>Dalle celle</option>
+              <option value="0">Dai pixel</option>
+            </select>
+          </div>
+
+          <div class="field compact">
+            <label for="ditherMode">Dithering</label>
+            <select id="ditherMode">
+              <option value="0" selected>Off</option>
+              <option value="1">Floyd–Steinberg</option>
+            </select>
+          </div>
+
+          <div class="field compact">
+            <label for="colorSpace">Color space</label>
+            <select id="colorSpace">
+              <option value="1" selected>Linear</option>
+              <option value="0">sRGB</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="drawerSection">
+          <div class="drawerSectionTitle">Output</div>
+          <label class="toggleRow">
+            <input id="trimTransparent" type="checkbox" />
+            Trim trasparenza (ritaglia bordi)
+          </label>
+
+          <div class="field compact">
+            <label for="scaleFactor">Scala finale</label>
+            <select id="scaleFactor">
+              <option value="1" selected>1x</option>
+              <option value="2">2x</option>
+              <option value="4">4x</option>
+              <option value="8">8x</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="drawerSection">
+          <div class="drawerSectionTitle">Download</div>
+          <div class="radioGroup">
+            <label class="radioRow">
+              <input type="radio" name="downloadMode" value="single" checked />
+              Singoli file
+            </label>
+            <label class="radioRow">
+              <input type="radio" name="downloadMode" value="zip" />
+              ZIP unico
+            </label>
+          </div>
+          <div id="zipStatus" class="hint">ZIP: interno (offline).</div>
+        </div>
+
+        <div class="drawerSection">
+          <div class="drawerSectionTitle">Debug / Preview</div>
+          <label class="toggleRow">
+            <input id="showGrid" type="checkbox" />
+            Overlay griglia (input)
+          </label>
+          <label class="toggleRow">
+            <input id="showPalette" type="checkbox" checked />
+            Mostra palette (preview)
+          </label>
+        </div>
+
+        <div class="drawerSection">
+          <div class="drawerSectionTitle">Preset</div>
+          <div class="presetRow">
+            <button class="secondary presetBtn" data-k="8">8</button>
+            <button class="secondary presetBtn" data-k="16">16</button>
+            <button class="secondary presetBtn" data-k="32">32</button>
+            <button class="secondary presetBtn" data-k="64">64</button>
+          </div>
+        </div>
+
+        <div class="drawerSection">
+          <div class="drawerSectionTitle">Batch</div>
+          <div id="batchList" class="batchList"></div>
+        </div>
+
+        <div class="drawerSection">
+          <div class="drawerSectionTitle">Palette</div>
+          <div id="paletteSwatches" class="swatches"></div>
+        </div>
+      </div>
+    </aside>
+
+    <script type="module" src="./main.js"></script>
+  </body>
+</html>

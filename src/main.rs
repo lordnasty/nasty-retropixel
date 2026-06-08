@@ -17,11 +17,18 @@ use std::path::{Path, PathBuf};
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::*;
 
+#[cfg(target_arch = "wasm32")]
+use js_sys::{Object, Reflect, Uint32Array, Uint8Array};
+
 #[derive(Debug, Clone)]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
 pub struct Config {
     pub k_colors: usize,
     pub pixel_size_override: Option<f64>,
+    pub prefilter_mode: u32,
+    pub palette_source: u32,
+    pub dither_mode: u32,
+    pub color_space: u32,
     k_seed: u64,
     /// Input image path only used for CLI use
     #[allow(dead_code)]
@@ -38,6 +45,7 @@ pub struct Config {
     min_cuts_per_axis: usize,
     fallback_target_segments: usize,
     max_step_ratio: f64,
+    autocorr_max_lag: usize,
 }
 
 impl Default for Config {
@@ -57,6 +65,11 @@ impl Default for Config {
             fallback_target_segments: 64,
             max_step_ratio: 1.8, // Lowered from 3.0 to catch more skew cases
             pixel_size_override: None,
+            prefilter_mode: 0,
+            palette_source: 1,
+            dither_mode: 0,
+            color_space: 1,
+            autocorr_max_lag: 256,
         }
     }
 }
@@ -111,6 +124,10 @@ pub struct BatchConfig {
     pub output_dir: PathBuf,
     pub k_colors: usize,
     pub pixel_size_override: Option<f64>,
+    pub prefilter_mode: u32,
+    pub palette_source: u32,
+    pub dither_mode: u32,
+    pub color_space: u32,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -121,6 +138,10 @@ impl From<&Config> for BatchConfig {
             output_dir: PathBuf::from(&config.output_path),
             k_colors: config.k_colors,
             pixel_size_override: config.pixel_size_override,
+            prefilter_mode: config.prefilter_mode,
+            palette_source: config.palette_source,
+            dither_mode: config.dither_mode,
+            color_space: config.color_space,
         }
     }
 }
@@ -131,6 +152,10 @@ impl From<&BatchConfig> for Config {
         Self {
             k_colors: config.k_colors,
             pixel_size_override: config.pixel_size_override,
+            prefilter_mode: config.prefilter_mode,
+            palette_source: config.palette_source,
+            dither_mode: config.dither_mode,
+            color_space: config.color_space,
             ..Default::default()
         }
     }
@@ -167,20 +192,34 @@ pub enum BatchEvent {
     },
 }
 
-/// CLI entry point
-#[cfg(not(target_arch = "wasm32"))]
 #[allow(dead_code)]
-fn main() -> Result<()> {
-    let config = parse_args().unwrap_or_default();
-    process(&config)
+struct DebugOutput {
+    output_bytes: Vec<u8>,
+    col_cuts: Vec<usize>,
+    row_cuts: Vec<usize>,
+    step_x: f64,
+    step_y: f64,
+    input_width: u32,
+    input_height: u32,
 }
 
-#[cfg(target_arch = "wasm32")]
 fn process_image_bytes_common(input_bytes: &[u8], config: Option<Config>) -> Result<Vec<u8>> {
-    process_image_common(input_bytes, config).map(|processed| processed.output_bytes)
+    process_image_common(input_bytes, config).map(|out| out.output_bytes)
 }
 
 fn process_image_common(input_bytes: &[u8], config: Option<Config>) -> Result<ProcessedImage> {
+    let config = config.unwrap_or_default();
+    let out = process_image_bytes_debug_common(input_bytes, Some(config.clone()))?;
+    Ok(ProcessedImage {
+        output_bytes: out.output_bytes,
+        pixel_size: out.step_x,
+        pixel_size_override: config.pixel_size_override.is_some(),
+        output_width: (out.col_cuts.len() - 1) as u32,
+        output_height: (out.row_cuts.len() - 1) as u32,
+    })
+}
+
+fn process_image_bytes_debug_common(input_bytes: &[u8], config: Option<Config>) -> Result<DebugOutput> {
     let config = config.unwrap_or_default();
 
     let img = image::load_from_memory(input_bytes)?;
@@ -199,9 +238,17 @@ fn process_image_common(input_bytes: &[u8], config: Option<Config>) -> Result<Pr
     }
 
     let rgba_img = img.to_rgba8();
+    let rgba_prefiltered = match config.prefilter_mode {
+        0 => rgba_img.clone(),
+        1 => prefilter_box3_alpha_aware(&rgba_img),
+        _ => rgba_img.clone(),
+    };
 
-    let quantized_img = quantize_image(&rgba_img, &config)?;
-    let (profile_x, profile_y) = compute_profiles(&quantized_img)?;
+    let mut profile_config = config.clone();
+    profile_config.k_colors = profile_config.k_colors.max(16).min(64);
+
+    let quantized_for_profile = quantize_image(&rgba_prefiltered, &profile_config)?;
+    let (profile_x, profile_y) = compute_profiles(&quantized_for_profile)?;
 
     // Estimate step sizes
     let step_x_opt = estimate_step_size(&profile_x, &config);
@@ -209,6 +256,17 @@ fn process_image_common(input_bytes: &[u8], config: Option<Config>) -> Result<Pr
 
     // Resolve step sizes. Some instabilities so use sibling axis if one fails, or fallback if both fail
     let (step_x, step_y) = resolve_step_sizes(step_x_opt, step_y_opt, width, height, &config);
+
+    #[cfg(not(target_arch = "wasm32"))]
+    println!(
+        "Pixel size: {:.1}px ({})",
+        step_x,
+        if config.pixel_size_override.is_some() {
+            "override"
+        } else {
+            "auto-detected"
+        }
+    );
 
     let raw_col_cuts = walk(&profile_x, step_x, width as usize, &config)?;
     let raw_row_cuts = walk(&profile_y, step_y, height as usize, &config)?;
@@ -224,7 +282,16 @@ fn process_image_common(input_bytes: &[u8], config: Option<Config>) -> Result<Pr
         &config,
     );
 
-    let output_img = resample(&quantized_img, &col_cuts, &row_cuts)?;
+    #[cfg(not(target_arch = "wasm32"))]
+    println!("Output size: {}x{}", col_cuts.len() - 1, row_cuts.len() - 1);
+
+    let output_img = match config.palette_source {
+        1 => resample_cells(&rgba_prefiltered, &col_cuts, &row_cuts, &config)?,
+        _ => {
+            let quantized_img = quantize_image(&rgba_prefiltered, &config)?;
+            resample_mode(&quantized_img, &col_cuts, &row_cuts)?
+        }
+    };
 
     // Returns bytes for both implementations
     let mut output_bytes = Vec::new();
@@ -233,13 +300,41 @@ fn process_image_common(input_bytes: &[u8], config: Option<Config>) -> Result<Pr
         .write_to(&mut cursor, image::ImageFormat::Png)
         .map_err(|e| PixelSnapperError::ImageError(e))?;
 
-    Ok(ProcessedImage {
+    Ok(DebugOutput {
         output_bytes,
-        pixel_size: step_x,
-        pixel_size_override: config.pixel_size_override.is_some(),
-        output_width: (col_cuts.len() - 1) as u32,
-        output_height: (row_cuts.len() - 1) as u32,
+        col_cuts,
+        row_cuts,
+        step_x,
+        step_y,
+        input_width: width,
+        input_height: height,
     })
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub fn process_image_bytes(
+    input_bytes: &[u8],
+    k_colors: Option<usize>,
+    pixel_size_override: Option<f64>,
+) -> Result<Vec<u8>> {
+    let mut config = Config::default();
+
+    if let Some(k) = k_colors {
+        if k == 0 {
+            return Err(PixelSnapperError::InvalidInput(
+                "k_colors must be greater than 0".to_string(),
+            ));
+        }
+        config.k_colors = k;
+    }
+
+    config.pixel_size_override = pixel_size_override;
+    process_image_bytes_common(input_bytes, Some(config))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub fn process_image_bytes_with_config(input_bytes: &[u8], config: Config) -> Result<Vec<u8>> {
+    process_image_bytes_common(input_bytes, Some(config))
 }
 
 /// WASM entry point
@@ -249,6 +344,10 @@ pub fn process_image(
     input_bytes: &[u8],
     k_colors: Option<u32>,
     pixel_size_override: Option<f64>,
+    prefilter_mode: Option<u32>,
+    palette_source: Option<u32>,
+    dither_mode: Option<u32>,
+    color_space: Option<u32>,
 ) -> std::result::Result<Vec<u8>, wasm_bindgen::JsValue> {
     let mut config = Config::default();
     if let Some(k) = k_colors {
@@ -261,9 +360,97 @@ pub fn process_image(
     }
 
     config.pixel_size_override = pixel_size_override;
+    if let Some(v) = prefilter_mode {
+        config.prefilter_mode = v;
+    }
+    if let Some(v) = palette_source {
+        config.palette_source = v;
+    }
+    if let Some(v) = dither_mode {
+        config.dither_mode = v;
+    }
+    if let Some(v) = color_space {
+        config.color_space = v;
+    }
 
     process_image_bytes_common(input_bytes, Some(config))
         .map_err(|e| wasm_bindgen::JsValue::from(e))
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+pub fn process_image_debug(
+    input_bytes: &[u8],
+    k_colors: Option<u32>,
+    pixel_size_override: Option<f64>,
+    prefilter_mode: Option<u32>,
+    palette_source: Option<u32>,
+    dither_mode: Option<u32>,
+    color_space: Option<u32>,
+) -> std::result::Result<wasm_bindgen::JsValue, wasm_bindgen::JsValue> {
+    let mut config = Config::default();
+    if let Some(k) = k_colors {
+        if k == 0 {
+            return Err(wasm_bindgen::JsValue::from_str(
+                "k_colors must be greater than 0",
+            ));
+        }
+        config.k_colors = k as usize;
+    }
+
+    config.pixel_size_override = pixel_size_override;
+    if let Some(v) = prefilter_mode {
+        config.prefilter_mode = v;
+    }
+    if let Some(v) = palette_source {
+        config.palette_source = v;
+    }
+    if let Some(v) = dither_mode {
+        config.dither_mode = v;
+    }
+    if let Some(v) = color_space {
+        config.color_space = v;
+    }
+
+    let out = process_image_bytes_debug_common(input_bytes, Some(config))
+        .map_err(|e| wasm_bindgen::JsValue::from(e))?;
+
+    let obj = Object::new();
+
+    let bytes = Uint8Array::from(out.output_bytes.as_slice());
+    let cols = Uint32Array::new_with_length(out.col_cuts.len() as u32);
+    for (i, v) in out.col_cuts.iter().enumerate() {
+        cols.set_index(i as u32, *v as u32);
+    }
+    let rows = Uint32Array::new_with_length(out.row_cuts.len() as u32);
+    for (i, v) in out.row_cuts.iter().enumerate() {
+        rows.set_index(i as u32, *v as u32);
+    }
+
+    Reflect::set(&obj, &JsValue::from_str("bytes"), &bytes.into())?;
+    Reflect::set(&obj, &JsValue::from_str("col_cuts"), &cols.into())?;
+    Reflect::set(&obj, &JsValue::from_str("row_cuts"), &rows.into())?;
+    Reflect::set(&obj, &JsValue::from_str("step_x"), &JsValue::from_f64(out.step_x))?;
+    Reflect::set(&obj, &JsValue::from_str("step_y"), &JsValue::from_f64(out.step_y))?;
+    Reflect::set(
+        &obj,
+        &JsValue::from_str("input_width"),
+        &JsValue::from_f64(out.input_width as f64),
+    )?;
+    Reflect::set(
+        &obj,
+        &JsValue::from_str("input_height"),
+        &JsValue::from_f64(out.input_height as f64),
+    )?;
+
+    Ok(obj.into())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[allow(dead_code)]
+fn main() -> Result<()> {
+    let config = parse_args().unwrap_or_default();
+    process(&config)
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -411,7 +598,6 @@ where
     let input_dir = &config.input_dir;
     let output_dir = &config.output_dir;
 
-    // Do not silently replace inputs; maybe that's ok though
     if input_dir == output_dir {
         return Err(PixelSnapperError::InvalidInput(
             "Batch output directory must be different from the input directory".to_string(),
@@ -601,6 +787,7 @@ fn get_output_path(output_dir: &Path, input_path: &Path) -> Result<PathBuf> {
     Ok(output_dir.join(format!("{}.png", stem)))
 }
 
+
 fn validate_image_dimensions(width: u32, height: u32) -> Result<()> {
     if width == 0 || height == 0 {
         return Err(PixelSnapperError::InvalidInput(
@@ -613,6 +800,42 @@ fn validate_image_dimensions(width: u32, height: u32) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+fn srgb_u8_to_linear_255(v: u8) -> f32 {
+    let s = v as f32 / 255.0;
+    (s.powf(2.2) * 255.0).clamp(0.0, 255.0)
+}
+
+fn linear_255_to_srgb_u8(v: f32) -> u8 {
+    let l = (v / 255.0).clamp(0.0, 1.0);
+    (l.powf(1.0 / 2.2) * 255.0).round().clamp(0.0, 255.0) as u8
+}
+
+fn rgb_to_space_255(rgb: [u8; 3], color_space: u32) -> [f32; 3] {
+    match color_space {
+        1 => [
+            srgb_u8_to_linear_255(rgb[0]),
+            srgb_u8_to_linear_255(rgb[1]),
+            srgb_u8_to_linear_255(rgb[2]),
+        ],
+        _ => [rgb[0] as f32, rgb[1] as f32, rgb[2] as f32],
+    }
+}
+
+fn space_255_to_rgb(space: [f32; 3], color_space: u32) -> [u8; 3] {
+    match color_space {
+        1 => [
+            linear_255_to_srgb_u8(space[0]),
+            linear_255_to_srgb_u8(space[1]),
+            linear_255_to_srgb_u8(space[2]),
+        ],
+        _ => [
+            space[0].round().clamp(0.0, 255.0) as u8,
+            space[1].round().clamp(0.0, 255.0) as u8,
+            space[2].round().clamp(0.0, 255.0) as u8,
+        ],
+    }
 }
 
 fn quantize_image(img: &RgbaImage, config: &Config) -> Result<RgbaImage> {
@@ -628,7 +851,7 @@ fn quantize_image(img: &RgbaImage, config: &Config) -> Result<RgbaImage> {
             if p[3] == 0 {
                 None
             } else {
-                Some([p[0] as f32, p[1] as f32, p[2] as f32])
+                Some(rgb_to_space_255([p[0], p[1], p[2]], config.color_space))
             }
         })
         .collect();
@@ -739,7 +962,7 @@ fn quantize_image(img: &RgbaImage, config: &Config) -> Result<RgbaImage> {
             new_img.put_pixel(x, y, *pixel);
             continue;
         }
-        let p = [pixel[0] as f32, pixel[1] as f32, pixel[2] as f32];
+        let p = rgb_to_space_255([pixel[0], pixel[1], pixel[2]], config.color_space);
         let mut min_dist = f32::MAX;
         let mut best_c = [pixel[0], pixel[1], pixel[2]];
 
@@ -747,7 +970,7 @@ fn quantize_image(img: &RgbaImage, config: &Config) -> Result<RgbaImage> {
             let d = dist_sq(&p, c);
             if d < min_dist {
                 min_dist = d;
-                best_c = [c[0].round() as u8, c[1].round() as u8, c[2].round() as u8];
+                best_c = space_255_to_rgb(*c, config.color_space);
             }
         }
         new_img.put_pixel(x, y, Rgba([best_c[0], best_c[1], best_c[2], pixel[3]]));
@@ -804,7 +1027,7 @@ fn estimate_step_size(profile: &[f64], config: &Config) -> Option<f64> {
 
     let max_val = profile.iter().cloned().fold(0.0 / 0.0, f64::max);
     if max_val == 0.0 {
-        return None; // Decide later
+        return estimate_step_size_autocorr(profile, config);
     }
     let threshold = max_val * config.peak_threshold_multiplier;
 
@@ -816,7 +1039,7 @@ fn estimate_step_size(profile: &[f64], config: &Config) -> Option<f64> {
     }
 
     if peaks.len() < 2 {
-        return None;
+        return estimate_step_size_autocorr(profile, config);
     }
 
     let mut clean_peaks = vec![peaks[0]];
@@ -827,7 +1050,7 @@ fn estimate_step_size(profile: &[f64], config: &Config) -> Option<f64> {
     }
 
     if clean_peaks.len() < 2 {
-        return None;
+        return estimate_step_size_autocorr(profile, config);
     }
 
     // Compute diffs
@@ -839,6 +1062,43 @@ fn estimate_step_size(profile: &[f64], config: &Config) -> Option<f64> {
     // Median
     diffs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Equal));
     Some(diffs[diffs.len() / 2])
+}
+
+fn estimate_step_size_autocorr(profile: &[f64], config: &Config) -> Option<f64> {
+    if profile.len() < 4 {
+        return None;
+    }
+
+    let mean = profile.iter().sum::<f64>() / profile.len() as f64;
+    let mut var = 0.0;
+    for &v in profile {
+        let d = v - mean;
+        var += d * d;
+    }
+    if var <= 0.0 {
+        return None;
+    }
+
+    let max_lag = config
+        .autocorr_max_lag
+        .min(profile.len().saturating_sub(1))
+        .min(profile.len() / 2)
+        .max(2);
+
+    let mut best_lag = None;
+    let mut best_score = f64::MIN;
+    for lag in 2..=max_lag {
+        let mut score = 0.0;
+        for i in 0..profile.len() - lag {
+            score += (profile[i] - mean) * (profile[i + lag] - mean);
+        }
+        if score > best_score {
+            best_score = score;
+            best_lag = Some(lag);
+        }
+    }
+
+    best_lag.map(|l| l as f64)
 }
 
 fn resolve_step_sizes(
@@ -1156,7 +1416,7 @@ fn snap_uniform_cuts(
     cuts
 }
 
-fn resample(img: &RgbaImage, cols: &[usize], rows: &[usize]) -> Result<RgbaImage> {
+fn resample_mode(img: &RgbaImage, cols: &[usize], rows: &[usize]) -> Result<RgbaImage> {
     if cols.len() < 2 || rows.len() < 2 {
         return Err(PixelSnapperError::ProcessingError(
             "Insufficient grid cuts for resampling".to_string(),
@@ -1209,4 +1469,324 @@ fn resample(img: &RgbaImage, cols: &[usize], rows: &[usize]) -> Result<RgbaImage
         }
     }
     Ok(final_img)
+}
+
+fn prefilter_box3_alpha_aware(img: &RgbaImage) -> RgbaImage {
+    let (w, h) = img.dimensions();
+    let mut out = RgbaImage::new(w, h);
+
+    for y in 0..h {
+        for x in 0..w {
+            let mut sum = [0u32; 4];
+            let mut n = 0u32;
+
+            let y0 = y.saturating_sub(1);
+            let y1 = (y + 1).min(h.saturating_sub(1));
+            let x0 = x.saturating_sub(1);
+            let x1 = (x + 1).min(w.saturating_sub(1));
+
+            for yy in y0..=y1 {
+                for xx in x0..=x1 {
+                    let p = img.get_pixel(xx, yy).0;
+                    if p[3] == 0 {
+                        continue;
+                    }
+                    sum[0] += p[0] as u32;
+                    sum[1] += p[1] as u32;
+                    sum[2] += p[2] as u32;
+                    sum[3] += p[3] as u32;
+                    n += 1;
+                }
+            }
+
+            if n == 0 {
+                out.put_pixel(x, y, Rgba([0, 0, 0, 0]));
+            } else {
+                out.put_pixel(
+                    x,
+                    y,
+                    Rgba([
+                        (sum[0] / n) as u8,
+                        (sum[1] / n) as u8,
+                        (sum[2] / n) as u8,
+                        (sum[3] / n) as u8,
+                    ]),
+                );
+            }
+        }
+    }
+
+    out
+}
+
+fn kmeans_palette(colors: &[[f32; 3]], k_colors: usize, seed: u64, max_iters: usize) -> Vec<[f32; 3]> {
+    if colors.is_empty() {
+        return vec![[0.0, 0.0, 0.0]];
+    }
+
+    let k = k_colors.min(colors.len()).max(1);
+    let mut rng = ChaCha8Rng::seed_from_u64(seed);
+
+    fn sample_index(rng: &mut ChaCha8Rng, upper: usize) -> usize {
+        let upper = upper as u64;
+        rng.gen_range(0..upper) as usize
+    }
+
+    fn dist_sq(p: &[f32; 3], c: &[f32; 3]) -> f32 {
+        let dr = p[0] - c[0];
+        let dg = p[1] - c[1];
+        let db = p[2] - c[2];
+        dr * dr + dg * dg + db * db
+    }
+
+    let mut centroids: Vec<[f32; 3]> = Vec::with_capacity(k);
+    let first_idx = sample_index(&mut rng, colors.len());
+    centroids.push(colors[first_idx]);
+    let mut distances = vec![f32::MAX; colors.len()];
+
+    for _ in 1..k {
+        let last_c = centroids.last().unwrap();
+        let mut sum_sq_dist = 0.0;
+
+        for (i, p) in colors.iter().enumerate() {
+            let d_sq = dist_sq(p, last_c);
+            if d_sq < distances[i] {
+                distances[i] = d_sq;
+            }
+            sum_sq_dist += distances[i];
+        }
+
+        if sum_sq_dist <= 0.0 {
+            let idx = sample_index(&mut rng, colors.len());
+            centroids.push(colors[idx]);
+        } else {
+            match WeightedIndex::new(&distances) {
+                Ok(dist) => {
+                    let idx = dist.sample(&mut rng);
+                    centroids.push(colors[idx]);
+                }
+                Err(_) => {
+                    let idx = sample_index(&mut rng, colors.len());
+                    centroids.push(colors[idx]);
+                }
+            }
+        }
+    }
+
+    let mut prev_centroids = centroids.clone();
+    for iteration in 0..max_iters {
+        let mut sums = vec![[0.0f32; 3]; k];
+        let mut counts = vec![0usize; k];
+
+        for p in colors {
+            let mut min_dist = f32::MAX;
+            let mut best_k = 0;
+
+            for (i, c) in centroids.iter().enumerate() {
+                let d = dist_sq(p, c);
+                if d < min_dist {
+                    min_dist = d;
+                    best_k = i;
+                }
+            }
+            sums[best_k][0] += p[0];
+            sums[best_k][1] += p[1];
+            sums[best_k][2] += p[2];
+            counts[best_k] += 1;
+        }
+
+        for i in 0..k {
+            if counts[i] > 0 {
+                let fcount = counts[i] as f32;
+                centroids[i] = [
+                    sums[i][0] / fcount,
+                    sums[i][1] / fcount,
+                    sums[i][2] / fcount,
+                ];
+            }
+        }
+
+        if iteration > 0 {
+            let mut max_movement = 0.0f32;
+            for (new_c, old_c) in centroids.iter().zip(prev_centroids.iter()) {
+                let movement = dist_sq(new_c, old_c);
+                if movement > max_movement {
+                    max_movement = movement;
+                }
+            }
+
+            if max_movement < 0.01 {
+                break;
+            }
+        }
+
+        prev_centroids.copy_from_slice(&centroids);
+    }
+
+    centroids
+}
+
+fn resample_cells(img: &RgbaImage, cols: &[usize], rows: &[usize], config: &Config) -> Result<RgbaImage> {
+    if cols.len() < 2 || rows.len() < 2 {
+        return Err(PixelSnapperError::ProcessingError(
+            "Insufficient grid cuts for resampling".to_string(),
+        ));
+    }
+
+    let out_w = (cols.len().max(1) - 1) as usize;
+    let out_h = (rows.len().max(1) - 1) as usize;
+
+    let mut cell_colors = vec![[0.0f32; 3]; out_w * out_h];
+    let mut cell_has = vec![false; out_w * out_h];
+    let mut cell_alpha = vec![0u8; out_w * out_h];
+
+    for (y_i, w_y) in rows.windows(2).enumerate() {
+        for (x_i, w_x) in cols.windows(2).enumerate() {
+            let ys = w_y[0];
+            let ye = w_y[1];
+            let xs = w_x[0];
+            let xe = w_x[1];
+
+            if xe <= xs || ye <= ys {
+                continue;
+            }
+
+            let mut sum_lin = [0.0f32; 3];
+            let mut sum_a = 0.0f32;
+            let mut max_a = 0u8;
+
+            for y in ys..ye {
+                for x in xs..xe {
+                    if x < img.width() as usize && y < img.height() as usize {
+                        let p = img.get_pixel(x as u32, y as u32).0;
+                        if p[3] == 0 {
+                            continue;
+                        }
+                        let a = p[3] as f32 / 255.0;
+                        sum_lin[0] += srgb_u8_to_linear_255(p[0]) * a;
+                        sum_lin[1] += srgb_u8_to_linear_255(p[1]) * a;
+                        sum_lin[2] += srgb_u8_to_linear_255(p[2]) * a;
+                        sum_a += a;
+                        max_a = max_a.max(p[3]);
+                    }
+                }
+            }
+
+            let idx = y_i * out_w + x_i;
+            if sum_a > 0.0 {
+                let mean_lin = [sum_lin[0] / sum_a, sum_lin[1] / sum_a, sum_lin[2] / sum_a];
+                let space = match config.color_space {
+                    1 => mean_lin,
+                    _ => [
+                        linear_255_to_srgb_u8(mean_lin[0]) as f32,
+                        linear_255_to_srgb_u8(mean_lin[1]) as f32,
+                        linear_255_to_srgb_u8(mean_lin[2]) as f32,
+                    ],
+                };
+                cell_colors[idx] = space;
+                cell_has[idx] = true;
+                cell_alpha[idx] = max_a;
+            }
+        }
+    }
+
+    let palette_input: Vec<[f32; 3]> = cell_colors
+        .iter()
+        .zip(cell_has.iter())
+        .filter_map(|(c, has)| if *has { Some(*c) } else { None })
+        .collect();
+
+    let palette = kmeans_palette(
+        &palette_input,
+        config.k_colors.max(1),
+        config.k_seed,
+        config.max_kmeans_iterations,
+    );
+
+    fn dist_sq(p: &[f32; 3], c: &[f32; 3]) -> f32 {
+        let dr = p[0] - c[0];
+        let dg = p[1] - c[1];
+        let db = p[2] - c[2];
+        dr * dr + dg * dg + db * db
+    }
+
+    let mut out_space = vec![[0.0f32; 3]; out_w * out_h];
+    if config.dither_mode == 1 {
+        let mut work = cell_colors.clone();
+        for y in 0..out_h {
+            for x in 0..out_w {
+                let idx = y * out_w + x;
+                if !cell_has[idx] {
+                    continue;
+                }
+                let p = work[idx];
+                let mut best = palette[0];
+                let mut best_d = f32::MAX;
+                for c in &palette {
+                    let d = dist_sq(&p, c);
+                    if d < best_d {
+                        best_d = d;
+                        best = *c;
+                    }
+                }
+                out_space[idx] = best;
+                let err = [p[0] - best[0], p[1] - best[1], p[2] - best[2]];
+
+                let add = |work: &mut [[f32; 3]], xi: isize, yi: isize, e: [f32; 3], w: f32, out_w: usize, out_h: usize| {
+                    if xi < 0 || yi < 0 {
+                        return;
+                    }
+                    let xi = xi as usize;
+                    let yi = yi as usize;
+                    if xi >= out_w || yi >= out_h {
+                        return;
+                    }
+                    let j = yi * out_w + xi;
+                    if !cell_has[j] {
+                        return;
+                    }
+                    work[j][0] = (work[j][0] + e[0] * w).clamp(0.0, 255.0);
+                    work[j][1] = (work[j][1] + e[1] * w).clamp(0.0, 255.0);
+                    work[j][2] = (work[j][2] + e[2] * w).clamp(0.0, 255.0);
+                };
+
+                add(&mut work, x as isize + 1, y as isize, err, 7.0 / 16.0, out_w, out_h);
+                add(&mut work, x as isize - 1, y as isize + 1, err, 3.0 / 16.0, out_w, out_h);
+                add(&mut work, x as isize, y as isize + 1, err, 5.0 / 16.0, out_w, out_h);
+                add(&mut work, x as isize + 1, y as isize + 1, err, 1.0 / 16.0, out_w, out_h);
+            }
+        }
+    } else {
+        for i in 0..cell_colors.len() {
+            if !cell_has[i] {
+                continue;
+            }
+            let p = cell_colors[i];
+            let mut best = palette[0];
+            let mut best_d = f32::MAX;
+            for c in &palette {
+                let d = dist_sq(&p, c);
+                if d < best_d {
+                    best_d = d;
+                    best = *c;
+                }
+            }
+            out_space[i] = best;
+        }
+    }
+
+    let mut out_img: RgbaImage = ImageBuffer::new(out_w as u32, out_h as u32);
+    for y in 0..out_h {
+        for x in 0..out_w {
+            let idx = y * out_w + x;
+            if !cell_has[idx] {
+                out_img.put_pixel(x as u32, y as u32, Rgba([0, 0, 0, 0]));
+                continue;
+            }
+            let rgb = space_255_to_rgb(out_space[idx], config.color_space);
+            out_img.put_pixel(x as u32, y as u32, Rgba([rgb[0], rgb[1], rgb[2], cell_alpha[idx]]));
+        }
+    }
+
+    Ok(out_img)
 }
