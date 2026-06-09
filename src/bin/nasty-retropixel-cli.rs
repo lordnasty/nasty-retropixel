@@ -1,4 +1,5 @@
-use nasty_retropixel::process_image_bytes_with_config;
+use nasty_retropixel::{process_batch_with_reporter, process_image_bytes_with_config, BatchConfig, BatchEvent};
+use std::path::{Path, PathBuf};
 
 fn main() {
     if let Err(e) = run() {
@@ -11,7 +12,7 @@ fn run() -> nasty_retropixel::Result<()> {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 3 {
         return Err(nasty_retropixel::PixelSnapperError::InvalidInput(
-            "Usage: nasty-retropixel-cli <input> <output> [k_colors] [--pixel-size <n>] [--denoise off|box3] [--palette-source pixels|cells] [--dither off|fs] [--color-space srgb|linear]".to_string(),
+            "Usage: nasty-retropixel-cli <input> <output> [k_colors] [--pixel-size <n>] [--denoise off|box3] [--palette-source pixels|cells] [--dither off|fs] [--color-space srgb|linear]\n\nNotes:\n- Use a file input + file output for single image.\n- Use a directory input + directory output for batch processing.".to_string(),
         ));
     }
 
@@ -139,15 +140,6 @@ fn run() -> nasty_retropixel::Result<()> {
         }
     }
 
-    println!("Processing: {}", input_path);
-
-    let img_bytes = std::fs::read(&input_path).map_err(|e| {
-        nasty_retropixel::PixelSnapperError::ProcessingError(format!(
-            "Failed to read input file: {}",
-            e
-        ))
-    })?;
-
     let mut config = nasty_retropixel::Config::default();
     if let Some(k) = k_colors {
         config.k_colors = k;
@@ -166,15 +158,109 @@ fn run() -> nasty_retropixel::Result<()> {
         config.color_space = v;
     }
 
+    let input = Path::new(&input_path);
+    let output = Path::new(&output_path);
+
+    if input.is_dir() {
+        let batch = BatchConfig {
+            input_dir: PathBuf::from(input),
+            output_dir: PathBuf::from(output),
+            k_colors: config.k_colors,
+            pixel_size_override: config.pixel_size_override,
+            prefilter_mode: config.prefilter_mode,
+            palette_source: config.palette_source,
+            dither_mode: config.dither_mode,
+            color_space: config.color_space,
+        };
+
+        return process_batch_with_reporter(&batch, |event| match event {
+            BatchEvent::BatchStarted { input_dir, total } => {
+                println!(
+                    "Batch processing {} image{} from: {}",
+                    total,
+                    if total == 1 { "" } else { "s" },
+                    input_dir.display()
+                );
+            }
+            BatchEvent::Started {
+                input,
+                index,
+                total,
+            } => {
+                println!("Processing {}/{}: {}", index + 1, total, input.display());
+            }
+            BatchEvent::Finished {
+                input,
+                output,
+                index,
+                total,
+            } => {
+                println!(
+                    "Done {}/{}: {} -> {}",
+                    index + 1,
+                    total,
+                    input.display(),
+                    output.display()
+                );
+            }
+            BatchEvent::Failed {
+                input,
+                output,
+                error,
+                index,
+                total,
+            } => {
+                eprintln!(
+                    "Failed {}/{}: {} -> {} ({})",
+                    index + 1,
+                    total,
+                    input.display(),
+                    output.display(),
+                    error
+                );
+            }
+            BatchEvent::BatchFinished { input_dir, total } => {
+                println!(
+                    "Processed {} image{} in: {}",
+                    total,
+                    if total == 1 { "" } else { "s" },
+                    input_dir.display()
+                );
+            }
+        });
+    }
+
+    let actual_output_path = if output.is_dir() {
+        let stem = input.file_stem().and_then(|s| s.to_str()).filter(|s| !s.is_empty());
+        let Some(stem) = stem else {
+            return Err(nasty_retropixel::PixelSnapperError::InvalidInput(format!(
+                "Input path has no file stem: {}",
+                input.display()
+            )));
+        };
+        output.join(format!("{}.png", stem))
+    } else {
+        PathBuf::from(output)
+    };
+
+    println!("Processing: {}", input_path);
+
+    let img_bytes = std::fs::read(&input_path).map_err(|e| {
+        nasty_retropixel::PixelSnapperError::ProcessingError(format!(
+            "Failed to read input file: {}",
+            e
+        ))
+    })?;
+
     let output_bytes = process_image_bytes_with_config(&img_bytes, config)?;
 
-    std::fs::write(&output_path, output_bytes).map_err(|e| {
+    std::fs::write(&actual_output_path, output_bytes).map_err(|e| {
         nasty_retropixel::PixelSnapperError::ProcessingError(format!(
             "Failed to write output file: {}",
             e
         ))
     })?;
 
-    println!("Saved to: {}", output_path);
+    println!("Saved to: {}", actual_output_path.display());
     Ok(())
 }
