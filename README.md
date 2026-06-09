@@ -67,7 +67,7 @@ cargo run --bin nasty-retropixel-cli -- input.png output.png 16
 Use a directory as the input path to process a batch:
 
 ```bash
-cargo run -- input_dir output_dir 16
+cargo run --bin nasty-retropixel-cli -- input_dir output_dir 16
 ```
 
 Useful CLI flags:
