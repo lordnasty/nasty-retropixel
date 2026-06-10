@@ -66,10 +66,80 @@
           <a id="downloadBtn" class="secondary disabled" href="#" download="nasty-retropixel.png"
             >Scarica PNG</a
           >
+          <a id="downloadDebugBtn" class="secondary disabled" href="#" download="nasty-retropixel.debug.json"
+            >Scarica Debug</a
+          >
+          <a id="downloadOverlayBtn" class="secondary disabled" href="#" download="nasty-retropixel.overlay.png"
+            >Scarica Overlay</a
+          >
           <button id="downloadAllBtn" class="secondary disabled">Scarica Tutto</button>
         </div>
 
         <div id="status" class="status">Carica un'immagine per iniziare.</div>
+
+        <section class="debugCard">
+          <div class="debugCardTitle">Debug Report</div>
+          <div class="debugMeta">
+            <div class="debugItem">
+              <span>Pixel size</span>
+              <strong id="debugPixelSize">-</strong>
+            </div>
+            <div class="debugItem">
+              <span>Griglia output</span>
+              <strong id="debugGridSize">-</strong>
+            </div>
+            <div class="debugItem">
+              <span>Palette finale</span>
+              <strong id="debugPaletteCount">-</strong>
+            </div>
+          </div>
+          <div id="debugModes" class="hint">Nessun report disponibile.</div>
+        </section>
+
+        <section class="debugCard">
+          <div class="debugCardTitle">Suggerimento Preset</div>
+          <div id="presetSuggestion" class="hint">Seleziona un'immagine per ottenere un preset consigliato.</div>
+          <div id="presetDifficulty" class="difficultyBadge hidden"></div>
+          <div id="presetForecast" class="forecastBox hidden"></div>
+          <div id="presetWarnings" class="warningList hidden"></div>
+          <div id="presetAdvice" class="adviceList hidden"></div>
+          <div id="presetSetupSummary" class="hint hidden"></div>
+          <div id="setupProfileBar" class="setupProfileBar hidden">
+            <button type="button" class="setupProfileBtn" data-setup-profile="conservative">Conservativo</button>
+            <button type="button" class="setupProfileBtn" data-setup-profile="balanced">Bilanciato</button>
+            <button type="button" class="setupProfileBtn" data-setup-profile="aggressive">Aggressivo</button>
+          </div>
+          <div id="setupProfileStatus" class="hint hidden"></div>
+          <div id="setupQuickOptions" class="setupQuickOptions hidden">
+            <label class="setupQuickToggle">
+              <input id="setupApplyPalette" type="checkbox" checked />
+              <span>Applica anche palette e colore cella</span>
+            </label>
+            <label class="setupQuickToggle">
+              <input id="setupApplyTrim" type="checkbox" checked />
+              <span>Applica anche trim trasparenza</span>
+            </label>
+            <label class="setupQuickToggle">
+              <input id="setupForceUltra" type="checkbox" />
+              <span>Forza repair Ultra</span>
+            </label>
+          </div>
+          <button id="applySuggestedSetupBtn" class="secondary small" disabled>Applica Setup Consigliato</button>
+          <button id="applySuggestedPresetBtn" class="secondary small" disabled>Applica Suggerito</button>
+          <button id="runVariantCompareBtn" class="secondary small" disabled>Confronta Varianti Rapide</button>
+          <div id="variantCompareStatus" class="hint hidden"></div>
+          <div id="variantRecommendation" class="variantRecommendation hidden">
+            <div class="variantRecommendationText">
+              <strong id="variantRecommendationLabel">Scelta consigliata</strong>
+              <span id="variantRecommendationReason" class="hint"></span>
+            </div>
+            <button id="applyRecommendedVariantBtn" class="secondary small" disabled>Usa Consigliata</button>
+          </div>
+          <div id="variantComparePanel" class="variantComparePanel hidden">
+            <div class="debugCardTitle">Varianti rapide</div>
+            <div id="variantCompareGrid" class="variantCompareGrid"></div>
+          </div>
+        </section>
       </section>
 
       <section class="preview">
@@ -107,6 +177,19 @@
             <input id="compareSlider" class="compareSlider" type="range" min="0" max="100" value="50" />
           </div>
         </div>
+        <div id="variantPreviewPanel" class="previewCard full hidden">
+          <div class="compareHeader">
+            <h2>Confronto Varianti Grande</h2>
+            <div class="compareTools">
+              <label class="toggleRow compactToggle">
+                <input id="variantShowDiff" type="checkbox" />
+                Mostra diff visivo
+              </label>
+              <div id="variantPreviewStatus" class="compareLabel">Nessuna variante generata.</div>
+            </div>
+          </div>
+          <div id="variantPreviewGrid" class="variantPreviewGrid"></div>
+        </div>
       </section>
     </main>
 
@@ -134,7 +217,13 @@
           <div class="drawerSectionTitle">Qualità</div>
 
           <div class="field compact">
-            <label for="denoiseMode">Denoise (artefatti)</label>
+            <div class="labelWithTip">
+              <label for="denoiseMode">Denoise (artefatti)</label>
+              <span class="tooltipInline" tabindex="0" aria-label="Aiuto Denoise">
+                <span class="tooltipTrigger">?</span>
+                <span class="tooltipBubble">Leggero prefilter prima del recovery della griglia. Utile su input AI rumorosi o con bordi morbidi.</span>
+              </span>
+            </div>
             <select id="denoiseMode">
               <option value="0" selected>Off</option>
               <option value="1">Box 3x3</option>
@@ -142,10 +231,55 @@
           </div>
 
           <div class="field compact">
-            <label for="paletteSource">Palette</label>
+            <div class="labelWithTip">
+              <label for="paletteSource">Palette</label>
+              <span class="tooltipInline" tabindex="0" aria-label="Aiuto Palette">
+                <span class="tooltipTrigger">?</span>
+                <span class="tooltipBubble">`Celle` produce di solito risultati piu' stabili per sprite e tiles. `Pixel` segue piu' da vicino il contenuto originale.</span>
+              </span>
+            </div>
             <select id="paletteSource">
               <option value="1" selected>Dalle celle</option>
               <option value="0">Dai pixel</option>
+            </select>
+          </div>
+
+          <label class="toggleRow">
+            <input id="paletteLockEnabled" type="checkbox" />
+            Palette lock (immagine)
+          </label>
+          <div class="field compact">
+            <label for="paletteLockFile">File palette</label>
+            <input id="paletteLockFile" type="file" accept="image/*" />
+          </div>
+
+          <div class="field compact">
+            <div class="labelWithTip">
+              <label for="paletteCleanupMode">Palette cleanup</label>
+              <span class="tooltipInline" tabindex="0" aria-label="Aiuto Palette Cleanup">
+                <span class="tooltipTrigger">?</span>
+                <span class="tooltipBubble">Compatta colori quasi identici. `Strict` e' piu' aggressivo ed e' utile su palette AI sporche o troppo frammentate.</span>
+              </span>
+            </div>
+            <select id="paletteCleanupMode">
+              <option value="1" selected>Base</option>
+              <option value="2">Strict</option>
+              <option value="0">Off</option>
+            </select>
+          </div>
+
+          <div class="field compact">
+            <div class="labelWithTip">
+              <label for="cellColorMode">Colore per cella</label>
+              <span class="tooltipInline" tabindex="0" aria-label="Aiuto Colore per cella">
+                <span class="tooltipTrigger">?</span>
+                <span class="tooltipBubble">`Dominante` e' netto e semplice. `Medoid` e' spesso piu' robusto su input AI sporchi. `Media` e' piu' morbida.</span>
+              </span>
+            </div>
+            <select id="cellColorMode">
+              <option value="1" selected>Dominante</option>
+              <option value="2">Medoid</option>
+              <option value="0">Media</option>
             </select>
           </div>
 
@@ -158,10 +292,46 @@
           </div>
 
           <div class="field compact">
-            <label for="colorSpace">Color space</label>
+            <div class="labelWithTip">
+              <label for="colorSpace">Color space</label>
+              <span class="tooltipInline" tabindex="0" aria-label="Aiuto Color Space">
+                <span class="tooltipTrigger">?</span>
+                <span class="tooltipBubble">`Linear` e' il default consigliato per quantizzazione e confronto colori piu' coerenti. `sRGB` e' piu' conservativo.</span>
+              </span>
+            </div>
             <select id="colorSpace">
               <option value="1" selected>Linear</option>
               <option value="0">sRGB</option>
+            </select>
+          </div>
+
+          <div class="field compact">
+            <div class="labelWithTip">
+              <label for="cleanupMode">Cleanup artefatti</label>
+              <span class="tooltipInline" tabindex="0" aria-label="Aiuto Cleanup">
+                <span class="tooltipTrigger">?</span>
+                <span class="tooltipBubble">Pulizia locale di pixel incoerenti rispetto al vicinato. E' il primo livello di correzione spaziale dopo la palette.</span>
+              </span>
+            </div>
+            <select id="cleanupMode">
+              <option value="1" selected>Base</option>
+              <option value="0">Off</option>
+            </select>
+          </div>
+
+          <div class="field compact">
+            <div class="labelWithTip">
+              <label for="repairMode">Repair strutturale</label>
+              <span class="tooltipInline" tabindex="0" aria-label="Aiuto Repair">
+                <span class="tooltipTrigger">?</span>
+                <span class="tooltipBubble">`Base` corregge bridge semplici. `Smart` chiude piccoli gap e diagonali sporche. `Ultra` e' il piu' aggressivo sui casi AI difficili.</span>
+              </span>
+            </div>
+            <select id="repairMode">
+              <option value="3">Ultra</option>
+              <option value="2" selected>Smart</option>
+              <option value="1">Base</option>
+              <option value="0">Off</option>
             </select>
           </div>
         </div>
@@ -212,13 +382,87 @@
         </div>
 
         <div class="drawerSection">
+          <div class="drawerSectionTitle">Guida Rapida</div>
+          <div class="quickGuide">
+            <div class="quickGuideIntro">
+              Riferimento veloce per scegliere le impostazioni senza uscire dalla GUI.
+            </div>
+
+            <details class="quickGuideItem" open>
+              <summary>Workflow consigliato</summary>
+              <div class="quickGuideBody">
+                <p><strong>Sprite AI standard</strong>: prova `AI Sprite` oppure `repair Smart`.</p>
+                <p><strong>Immagine molto sporca</strong>: usa `Ultra Cleanup` oppure `repair Ultra`.</p>
+                <p><strong>Tileset</strong>: meglio `Tileset`, palette dalle celle e repair `Smart`.</p>
+                <p><strong>Icone/UI</strong>: usa `Icon`, palette piu' piccola e cleanup non eccessivo.</p>
+              </div>
+            </details>
+
+            <details class="quickGuideItem">
+              <summary>Qualita' e colore</summary>
+              <div class="quickGuideBody">
+                <p><strong>Denoise Box 3x3</strong>: utile su input AI con rumore o bordi morbidi.</p>
+                <p><strong>Palette cleanup Strict</strong>: compatta colori quasi identici in modo piu' aggressivo.</p>
+                <p><strong>Dominante</strong>: piu' netto e semplice; <strong>Medoid</strong>: spesso migliore su input sporchi.</p>
+                <p><strong>Linear</strong>: default consigliato per quantizzazione piu' coerente.</p>
+              </div>
+            </details>
+
+            <details class="quickGuideItem">
+              <summary>Repair e cleanup</summary>
+              <div class="quickGuideBody">
+                <p><strong>Cleanup Base</strong>: rimuove piccoli pixel incoerenti nel vicinato.</p>
+                <p><strong>Repair Base</strong>: corregge bridge semplici orizzontali e verticali.</p>
+                <p><strong>Repair Smart</strong>: chiude piccoli gap, toglie micro-isole e consolida diagonali.</p>
+                <p><strong>Repair Ultra</strong>: piu' aggressivo, da usare su output AI molto degradati.</p>
+              </div>
+            </details>
+
+            <details class="quickGuideItem">
+              <summary>Debug e output</summary>
+              <div class="quickGuideBody">
+                <p><strong>Scarica Debug</strong>: esporta il report JSON con griglia, palette e modalita' effettive.</p>
+                <p><strong>Scarica Overlay</strong>: esporta la PNG con la griglia rilevata sopra l'input.</p>
+                <p><strong>Trim trasparenza</strong>: ritaglia i bordi vuoti dopo il processing.</p>
+                <p><strong>Scala finale</strong>: esegue upscale nearest senza sfocare i pixel.</p>
+              </div>
+            </details>
+
+            <div class="quickGuideFoot">
+              Guida completa nel repository: <code>Guida Funzioni Nasty RetroPixel.md</code>
+            </div>
+          </div>
+        </div>
+
+        <div class="drawerSection">
           <div class="drawerSectionTitle">Preset</div>
           <div class="presetRow">
-            <button class="secondary presetBtn" data-k="8">8</button>
-            <button class="secondary presetBtn" data-k="16">16</button>
-            <button class="secondary presetBtn" data-k="32">32</button>
-            <button class="secondary presetBtn" data-k="64">64</button>
+            <button class="secondary presetBtn presetCard" data-preset="ai-sprite">
+              <span class="presetCardTitle">AI Sprite</span>
+              <span class="presetCardDesc">Caso generale per cleanup AI con griglia e palette da ricostruire.</span>
+            </button>
+            <button class="secondary presetBtn presetCard" data-preset="strict-retro">
+              <span class="presetCardTitle">Strict Retro</span>
+              <span class="presetCardDesc">Look piu' rigido e controllato con palette contenuta e blocchi netti.</span>
+            </button>
+            <button class="secondary presetBtn presetCard" data-preset="tileset-cleanup">
+              <span class="presetCardTitle">Tileset</span>
+              <span class="presetCardDesc">Ottimizzato per celle stabili, texture grid-based e coerenza tra tile.</span>
+            </button>
+            <button class="secondary presetBtn presetCard" data-preset="character-cleanup">
+              <span class="presetCardTitle">Character</span>
+              <span class="presetCardDesc">Pensato per sprite e silhouette con contorni e masse da pulire.</span>
+            </button>
+            <button class="secondary presetBtn presetCard" data-preset="icon-cleanup">
+              <span class="presetCardTitle">Icon</span>
+              <span class="presetCardDesc">Riduce il rumore e privilegia chiarezza grafica per icone e UI.</span>
+            </button>
+            <button class="secondary presetBtn presetCard" data-preset="ultra-cleanup">
+              <span class="presetCardTitle">Ultra</span>
+              <span class="presetCardDesc">Profilo piu' aggressivo per output AI molto sporchi o strutturalmente instabili.</span>
+            </button>
           </div>
+          <div id="presetStatus" class="hint">Preset manuale non selezionato.</div>
         </div>
 
         <div class="drawerSection">

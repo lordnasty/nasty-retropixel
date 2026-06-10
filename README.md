@@ -30,6 +30,10 @@ An AI pixel-art cleanup and grid recovery tool based on the Sprite Fusion Pixel 
 - Rebuild a palette-aware result suitable for games, spritesheets and tilesets.
 - Keep enough detail to remain faithful to the source while making it production-friendly.
 
+## Documentation
+
+- Detailed feature guide: [`Guida Funzioni Nasty RetroPixel.md`](./Guida%20Funzioni%20Nasty%20RetroPixel.md)
+
 ## Perfect for
 
 - **AI generated pixel art** that needs cleanup before it is usable.
