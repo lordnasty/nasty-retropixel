@@ -71,6 +71,7 @@ const els = {
   drawer: document.getElementById("drawer"),
   drawerOverlay: document.getElementById("drawerOverlay"),
   batchMode: document.getElementById("batchMode"),
+  folderMode: document.getElementById("folderMode"),
   denoiseMode: document.getElementById("denoiseMode"),
   paletteSource: document.getElementById("paletteSource"),
   paletteLockEnabled: document.getElementById("paletteLockEnabled"),
@@ -154,6 +155,7 @@ const REQUIRED_KEYS = [
   "drawer",
   "drawerOverlay",
   "batchMode",
+  "folderMode",
   "denoiseMode",
   "paletteSource",
   "paletteLockEnabled",
@@ -807,6 +809,7 @@ function writeSettings() {
       pixelSize: els.pixelSize.value,
       zoom: els.zoom.value,
       batchMode: els.batchMode.checked,
+      folderMode: els.folderMode.checked,
       denoiseMode: els.denoiseMode.value,
       paletteSource: els.paletteSource.value,
       paletteLockEnabled: els.paletteLockEnabled.checked,
@@ -836,6 +839,7 @@ function applySettings(settings) {
   if (settings.pixelSize != null) els.pixelSize.value = String(settings.pixelSize);
   if (settings.zoom != null) els.zoom.value = String(settings.zoom);
   if (settings.batchMode != null) els.batchMode.checked = Boolean(settings.batchMode);
+  if (settings.folderMode != null) els.folderMode.checked = Boolean(settings.folderMode);
   if (settings.denoiseMode != null) els.denoiseMode.value = String(settings.denoiseMode);
   if (settings.paletteSource != null) els.paletteSource.value = String(settings.paletteSource);
   if (settings.paletteLockEnabled != null)
@@ -992,11 +996,21 @@ async function refreshPresetSuggestion(file) {
 
 function updateUiFromSettings() {
   els.pixelSize.disabled = !els.pixelOverrideEnabled.checked;
-  els.fileInput.multiple = els.batchMode.checked;
+  if (!els.batchMode.checked) {
+    els.fileInput.multiple = false;
+    els.fileInput.removeAttribute("webkitdirectory");
+  } else if (els.folderMode.checked) {
+    els.fileInput.multiple = false;
+    els.fileInput.setAttribute("webkitdirectory", "");
+  } else {
+    els.fileInput.multiple = true;
+    els.fileInput.removeAttribute("webkitdirectory");
+  }
   els.downloadAllBtn.textContent = els.batchMode.checked ? "Scarica Tutto" : "Scarica PNG";
   els.batchList.parentElement.classList.toggle("hidden", !els.batchMode.checked);
   els.batchIncludeDebug.parentElement.classList.toggle("hidden", !els.batchMode.checked);
   els.batchIncludeDebug.disabled = !els.batchMode.checked || getDownloadMode() !== "zip";
+  els.folderMode.parentElement.classList.toggle("hidden", !els.batchMode.checked);
   els.zipStatus.textContent = els.batchMode.checked
     ? "ZIP: interno (offline). Consigliato per batch."
     : "ZIP: interno (offline).";
@@ -1094,7 +1108,8 @@ function crc32(bytes) {
 }
 
 function toZipBaseName(originalName) {
-  const base = originalName.replace(/^.*[\\/]/, "").replace(/\.[^/.]+$/, "");
+  const normalized = String(originalName ?? "").replace(/\\/g, "/");
+  const base = normalized.replace(/\.[^/.]+$/, "");
   return `${base}_nasty-retropixel`;
 }
 
@@ -2071,8 +2086,13 @@ async function runVariantComparison() {
 
 function setDropText() {
   if (els.batchMode.checked) {
-    els.dropTitle.textContent = "Trascina qui più file";
-    els.dropSub.textContent = "oppure clicca per selezionare (multi)";
+    if (els.folderMode.checked) {
+      els.dropTitle.textContent = "Seleziona una cartella";
+      els.dropSub.textContent = "oppure trascina più file";
+    } else {
+      els.dropTitle.textContent = "Trascina qui più file";
+      els.dropSub.textContent = "oppure clicca per selezionare (multi)";
+    }
   } else {
     els.dropTitle.textContent = "Trascina qui un file";
     els.dropSub.textContent = "oppure clicca per selezionare";
@@ -2276,6 +2296,12 @@ window.addEventListener("keyup", (e) => {
 });
 
 els.batchMode.addEventListener("change", () => {
+  updateUiFromSettings();
+  setDropText();
+  writeSettings();
+});
+
+els.folderMode.addEventListener("change", () => {
   updateUiFromSettings();
   setDropText();
   writeSettings();
@@ -2503,7 +2529,10 @@ els.processBtn.addEventListener("click", async () => {
       return;
     }
 
-    const items = selectedFiles.map((f) => ({ file: f, ui: addBatchItem(f.name) }));
+    const items = selectedFiles.map((f) => ({
+      file: f,
+      ui: addBatchItem(f.webkitRelativePath || f.name),
+    }));
     const includeBatchDebug = els.batchIncludeDebug.checked && getDownloadMode() === "zip";
     for (const it of items) {
       it.ui.statusEl.textContent = "processing...";
@@ -2514,6 +2543,7 @@ els.processBtn.addEventListener("click", async () => {
         const url = URL.createObjectURL(blob);
         batchResults.push({
           name: it.file.name,
+          path: it.file.webkitRelativePath || it.file.name,
           bytes: processedBytes,
           url,
           debug: result.debug ?? null,
