@@ -85,6 +85,7 @@ const els = {
   scaleFactor: document.getElementById("scaleFactor"),
   showPalette: document.getElementById("showPalette"),
   zipStatus: document.getElementById("zipStatus"),
+  batchIncludeDebug: document.getElementById("batchIncludeDebug"),
   batchList: document.getElementById("batchList"),
   paletteSwatches: document.getElementById("paletteSwatches"),
   showGrid: document.getElementById("showGrid"),
@@ -168,6 +169,7 @@ const REQUIRED_KEYS = [
   "showPalette",
   "showGrid",
   "zipStatus",
+  "batchIncludeDebug",
   "batchList",
   "paletteSwatches",
   "inputGridOverlay",
@@ -819,6 +821,7 @@ function writeSettings() {
       showPalette: els.showPalette.checked,
       showGrid: els.showGrid.checked,
       downloadMode: getDownloadMode(),
+      batchIncludeDebug: els.batchIncludeDebug.checked,
     };
     localStorage.setItem(STORAGE_KEY, JSON.stringify(settings));
   } catch {}
@@ -849,6 +852,8 @@ function applySettings(settings) {
   if (settings.scaleFactor != null) els.scaleFactor.value = String(settings.scaleFactor);
   if (settings.showPalette != null) els.showPalette.checked = Boolean(settings.showPalette);
   if (settings.showGrid != null) els.showGrid.checked = Boolean(settings.showGrid);
+  if (settings.batchIncludeDebug != null)
+    els.batchIncludeDebug.checked = Boolean(settings.batchIncludeDebug);
   if (settings.downloadMode === "zip") {
     const zipRadio = document.querySelector('input[name="downloadMode"][value="zip"]');
     if (zipRadio) zipRadio.checked = true;
@@ -990,6 +995,8 @@ function updateUiFromSettings() {
   els.fileInput.multiple = els.batchMode.checked;
   els.downloadAllBtn.textContent = els.batchMode.checked ? "Scarica Tutto" : "Scarica PNG";
   els.batchList.parentElement.classList.toggle("hidden", !els.batchMode.checked);
+  els.batchIncludeDebug.parentElement.classList.toggle("hidden", !els.batchMode.checked);
+  els.batchIncludeDebug.disabled = !els.batchMode.checked || getDownloadMode() !== "zip";
   els.zipStatus.textContent = els.batchMode.checked
     ? "ZIP: interno (offline). Consigliato per batch."
     : "ZIP: interno (offline).";
@@ -1086,9 +1093,21 @@ function crc32(bytes) {
   return (crc ^ 0xffffffff) >>> 0;
 }
 
-function toZipEntryName(originalName) {
+function toZipBaseName(originalName) {
   const base = originalName.replace(/^.*[\\/]/, "").replace(/\.[^/.]+$/, "");
-  return `${base}_nasty-retropixel.png`;
+  return `${base}_nasty-retropixel`;
+}
+
+function toZipEntryName(originalName) {
+  return `${toZipBaseName(originalName)}.png`;
+}
+
+function toZipDebugName(originalName) {
+  return `${toZipBaseName(originalName)}.debug.json`;
+}
+
+function toZipOverlayName(originalName) {
+  return `${toZipBaseName(originalName)}.overlay.png`;
 }
 
 function buildZipStore(entries) {
@@ -1468,9 +1487,9 @@ function addBatchItem(name) {
   return { row, statusEl: right };
 }
 
-async function processSingleFile(file) {
+async function processSingleFile(file, options = {}) {
   const ctx = await resolveSingleFileContext(file);
-  return processResolvedSingleFile(ctx, { includeDebug: false });
+  return processResolvedSingleFile(ctx, { includeDebug: Boolean(options.includeDebug) });
 }
 
 async function resolveSingleFileContext(file) {
@@ -2485,14 +2504,21 @@ els.processBtn.addEventListener("click", async () => {
     }
 
     const items = selectedFiles.map((f) => ({ file: f, ui: addBatchItem(f.name) }));
+    const includeBatchDebug = els.batchIncludeDebug.checked && getDownloadMode() === "zip";
     for (const it of items) {
       it.ui.statusEl.textContent = "processing...";
       try {
-        const result = await processSingleFile(it.file);
+        const result = await processSingleFile(it.file, { includeDebug: includeBatchDebug });
         const processedBytes = result.bytes;
         const blob = new Blob([processedBytes], { type: "image/png" });
         const url = URL.createObjectURL(blob);
-        batchResults.push({ name: it.file.name, bytes: processedBytes, url });
+        batchResults.push({
+          name: it.file.name,
+          bytes: processedBytes,
+          url,
+          debug: result.debug ?? null,
+          overlayBytes: result.overlayBytes ?? null,
+        });
         it.ui.statusEl.textContent = "ok";
       } catch (e) {
         it.ui.statusEl.textContent = "errore";
@@ -2550,9 +2576,19 @@ els.downloadAllBtn.addEventListener("click", async () => {
   if (getDownloadMode() === "zip") {
     try {
       els.zipStatus.textContent = "ZIP: generazione...";
-      const zipBytes = buildZipStore(
-        batchResults.map((r) => ({ name: toZipEntryName(r.name), bytes: r.bytes })),
-      );
+      const includeDebug = els.batchIncludeDebug.checked;
+      const enc = new TextEncoder();
+      const entries = [];
+      for (const r of batchResults) {
+        entries.push({ name: toZipEntryName(r.name), bytes: r.bytes });
+        if (includeDebug && r.debug) {
+          entries.push({ name: toZipDebugName(r.name), bytes: enc.encode(JSON.stringify(r.debug, null, 2)) });
+          if (r.overlayBytes && r.overlayBytes.length > 0) {
+            entries.push({ name: toZipOverlayName(r.name), bytes: r.overlayBytes });
+          }
+        }
+      }
+      const zipBytes = buildZipStore(entries);
       const blob = new Blob([zipBytes], { type: "application/zip" });
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
