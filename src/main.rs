@@ -2210,7 +2210,7 @@ where
 
     let items: Vec<(PathBuf, PathBuf)> = inputs
         .iter()
-        .map(|input| Ok((input.clone(), get_output_path(output_dir, input)?)))
+        .map(|input| Ok((input.clone(), get_output_path(output_dir, input_dir, input)?)))
         .collect::<Result<_>>()?;
 
     reporter(BatchEvent::BatchStarted {
@@ -2228,12 +2228,19 @@ where
                 total: items.len(),
             });
             let item_config = Config::from(config);
-            let result = process_file_with_debug_exports(
+            let debug_relative_dir = input
+                .strip_prefix(input_dir)
+                .ok()
+                .and_then(|rel| rel.parent())
+                .filter(|p| !p.as_os_str().is_empty())
+                .map(Path::to_path_buf);
+            let result = process_file_with_debug_exports_internal(
                 input,
                 output,
                 &item_config,
                 &config.debug,
                 config.palette_lock_bytes.as_deref(),
+                debug_relative_dir.as_deref(),
             )
             .map(|_| ());
             match &result {
@@ -2298,6 +2305,25 @@ pub fn process_file_with_debug_exports(
     debug: &DebugExportOptions,
     palette_lock_image_bytes: Option<&[u8]>,
 ) -> Result<ProcessedImage> {
+    process_file_with_debug_exports_internal(
+        input_path,
+        output_path,
+        config,
+        debug,
+        palette_lock_image_bytes,
+        None,
+    )
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn process_file_with_debug_exports_internal(
+    input_path: &Path,
+    output_path: &Path,
+    config: &Config,
+    debug: &DebugExportOptions,
+    palette_lock_image_bytes: Option<&[u8]>,
+    debug_relative_dir: Option<&Path>,
+) -> Result<ProcessedImage> {
     let img_bytes = std::fs::read(input_path).map_err(|e| {
         PixelSnapperError::ProcessingError(format!(
             "Failed to read input file '{}': {}",
@@ -2311,6 +2337,16 @@ pub fn process_file_with_debug_exports(
     let overlay_bytes = out.overlay_bytes;
     let report = out.report;
 
+    if let Some(parent) = output_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            PixelSnapperError::ProcessingError(format!(
+                "Failed to create output directory '{}': {}",
+                parent.display(),
+                e
+            ))
+        })?;
+    }
+
     std::fs::write(output_path, &output_bytes).map_err(|e| {
         PixelSnapperError::ProcessingError(format!(
             "Failed to write output file '{}': {}",
@@ -2319,7 +2355,14 @@ pub fn process_file_with_debug_exports(
         ))
     })?;
 
-    write_debug_exports(input_path, output_path, debug, &report, &overlay_bytes)?;
+    write_debug_exports(
+        input_path,
+        output_path,
+        debug,
+        debug_relative_dir,
+        &report,
+        &overlay_bytes,
+    )?;
 
     Ok(ProcessedImage {
         output_bytes,
@@ -2354,6 +2397,7 @@ fn write_debug_exports(
     input_path: &Path,
     output_path: &Path,
     debug: &DebugExportOptions,
+    debug_relative_dir: Option<&Path>,
     report: &DebugReport,
     overlay_bytes: &[u8],
 ) -> Result<()> {
@@ -2361,10 +2405,15 @@ fn write_debug_exports(
         return Ok(());
     }
 
-    let base_dir = debug
+    let mut base_dir = debug
         .output_dir
         .clone()
         .unwrap_or_else(|| output_path.parent().unwrap_or_else(|| Path::new(".")).to_path_buf());
+    if debug.output_dir.is_some() {
+        if let Some(rel) = debug_relative_dir {
+            base_dir = base_dir.join(rel);
+        }
+    }
     std::fs::create_dir_all(&base_dir).map_err(|e| {
         PixelSnapperError::ProcessingError(format!(
             "Failed to create debug directory '{}': {}",
@@ -2419,30 +2468,41 @@ fn write_debug_exports(
 
 #[cfg(not(target_arch = "wasm32"))]
 fn collect_batch_inputs(input_dir: &Path) -> Result<Vec<PathBuf>> {
-    let entries = std::fs::read_dir(input_dir).map_err(|e| {
+    let mut inputs = Vec::new();
+    collect_batch_inputs_recursive(input_dir, input_dir, &mut inputs)?;
+    Ok(inputs)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn collect_batch_inputs_recursive(root: &Path, current: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
+    let entries = std::fs::read_dir(current).map_err(|e| {
         PixelSnapperError::ProcessingError(format!(
             "Failed to read input directory '{}': {}",
-            input_dir.display(),
+            current.display(),
             e
         ))
     })?;
 
-    let mut inputs = Vec::new();
     for entry in entries {
         let entry = entry.map_err(|e| {
             PixelSnapperError::ProcessingError(format!(
                 "Failed to read an entry from '{}': {}",
-                input_dir.display(),
+                current.display(),
                 e
             ))
         })?;
         let path = entry.path();
+        if path.is_dir() {
+            collect_batch_inputs_recursive(root, &path, out)?;
+            continue;
+        }
         if path.is_file() && is_supported_image_path(&path) {
-            inputs.push(path);
+            if path.strip_prefix(root).is_ok() {
+                out.push(path);
+            }
         }
     }
-
-    Ok(inputs)
+    Ok(())
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -2454,7 +2514,15 @@ fn is_supported_image_path(path: &Path) -> bool {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn get_output_path(output_dir: &Path, input_path: &Path) -> Result<PathBuf> {
+fn get_output_path(output_dir: &Path, input_dir: &Path, input_path: &Path) -> Result<PathBuf> {
+    let rel = input_path.strip_prefix(input_dir).map_err(|_| {
+        PixelSnapperError::InvalidInput(format!(
+            "Input path '{}' is not under input directory '{}'",
+            input_path.display(),
+            input_dir.display()
+        ))
+    })?;
+    let rel_parent = rel.parent().unwrap_or_else(|| Path::new(""));
     let stem = input_path
         .file_stem()
         .and_then(|stem| stem.to_str())
@@ -2466,7 +2534,7 @@ fn get_output_path(output_dir: &Path, input_path: &Path) -> Result<PathBuf> {
             ))
         })?;
 
-    Ok(output_dir.join(format!("{}.png", stem)))
+    Ok(output_dir.join(rel_parent).join(format!("{}.png", stem)))
 }
 
 
