@@ -16,7 +16,7 @@ fn run() -> nasty_retropixel::Result<()> {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 3 {
         return Err(nasty_retropixel::PixelSnapperError::InvalidInput(
-            "Usage: nasty-retropixel-cli <input> <output> [k_colors] [--preset ai-sprite|strict-retro|tileset-cleanup|character-cleanup|icon-cleanup|ultra-cleanup|auto] [--pixel-size <n>] [--denoise off|box3] [--palette-source pixels|cells] [--palette-lock <palette.png>] [--palette-cleanup off|basic|strict] [--cell-color mean|dominant|medoid] [--dither off|fs] [--color-space srgb|linear] [--cleanup off|basic] [--repair off|basic|smart|ultra] [--recommend-variant] [--debug-json] [--debug-overlay] [--debug-dir <path>]\n\nNotes:\n- Use a file input + file output for single image.\n- Use a directory input + directory output for batch processing.".to_string(),
+            "Usage: nasty-retropixel-cli <input> <output> [k_colors] [--preset ai-sprite|strict-retro|tileset-cleanup|character-cleanup|icon-cleanup|ultra-cleanup|auto] [--pixel-size <n>] [--denoise off|box3] [--palette-source pixels|cells] [--palette-lock <palette.png>] [--palette-cleanup off|basic|strict] [--cell-color mean|dominant|medoid] [--dither off|fs] [--color-space srgb|linear] [--cleanup off|basic] [--repair off|basic|smart|ultra] [--recommend-variant] [--debug-json] [--debug-overlay] [--debug-heatmap] [--debug-dir <path>]\n\nNotes:\n- Use a file input + file output for single image.\n- Use a directory input + directory output for batch processing.".to_string(),
         ));
     }
 
@@ -37,6 +37,7 @@ fn run() -> nasty_retropixel::Result<()> {
     let mut repair_mode: Option<u32> = None;
     let mut debug_json = false;
     let mut debug_overlay = false;
+    let mut debug_heatmap = false;
     let mut debug_dir: Option<PathBuf> = None;
     let mut recommend_variant = false;
 
@@ -245,6 +246,10 @@ fn run() -> nasty_retropixel::Result<()> {
                 debug_overlay = true;
                 i += 1;
             }
+            "--debug-heatmap" => {
+                debug_heatmap = true;
+                i += 1;
+            }
             "--debug-dir" => {
                 let Some(val) = args.get(i + 1) else {
                     return Err(nasty_retropixel::PixelSnapperError::InvalidInput(
@@ -321,6 +326,7 @@ fn run() -> nasty_retropixel::Result<()> {
     let debug = DebugExportOptions {
         write_json: debug_json,
         write_overlay: debug_overlay,
+        write_heatmap: debug_heatmap,
         output_dir: debug_dir,
     };
     let palette_lock_bytes = if let Some(path) = &palette_lock_path {
@@ -537,7 +543,7 @@ fn run() -> nasty_retropixel::Result<()> {
     )?;
 
     println!("Saved to: {}", actual_output_path.display());
-    if debug.write_json || debug.write_overlay {
+    if debug.write_json || debug.write_overlay || debug.write_heatmap {
         let debug_root = debug
             .output_dir
             .clone()

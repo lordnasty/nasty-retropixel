@@ -636,6 +636,14 @@ pub fn recommend_variant_from_metrics(metrics: &[VariantMetrics]) -> Result<Vari
 fn compute_diff_metrics_centered(input_bytes: &[u8], output_png_bytes: &[u8]) -> Result<(f64, f64)> {
     let input_img = image::load_from_memory(input_bytes)?.to_rgba8();
     let out_img = image::load_from_memory(output_png_bytes)?.to_rgba8();
+    let (_, diff_score, diff_area) = build_diff_heatmap_centered(&input_img, &out_img)?;
+    Ok((diff_score, diff_area))
+}
+
+fn build_diff_heatmap_centered(
+    input_img: &RgbaImage,
+    out_img: &RgbaImage,
+) -> Result<(RgbaImage, f64, f64)> {
     let (w_in, h_in) = input_img.dimensions();
     let (w_out, h_out) = out_img.dimensions();
     validate_image_dimensions(w_in, h_in)?;
@@ -649,6 +657,7 @@ fn compute_diff_metrics_centered(input_bytes: &[u8], output_png_bytes: &[u8]) ->
     let ox_out = (width as i64 - w_out as i64) / 2;
     let oy_out = (height as i64 - h_out as i64) / 2;
 
+    let mut heatmap = RgbaImage::new(width, height);
     let mut diff_sum = 0.0f64;
     let mut active = 0usize;
     let total = (width as usize).saturating_mul(height as usize).max(1);
@@ -680,10 +689,21 @@ fn compute_diff_metrics_centered(input_bytes: &[u8], output_png_bytes: &[u8]) ->
             if intensity > 12.0 {
                 active += 1;
             }
+
+            let norm = (intensity / 255.0).clamp(0.0, 1.0);
+            let alpha = if norm < 0.045 {
+                0
+            } else {
+                (norm * 220.0 + 35.0).round().clamp(0.0, 255.0) as u8
+            };
+            let red = (norm * 255.0).round().clamp(0.0, 255.0) as u8;
+            let green = (norm * norm * 180.0).round().clamp(0.0, 255.0) as u8;
+            let blue = ((1.0 - norm) * 90.0).round().clamp(0.0, 255.0) as u8;
+            heatmap.put_pixel(x as u32, y as u32, Rgba([red, green, blue, alpha]));
         }
     }
 
-    Ok((diff_sum / total as f64, active as f64 / total as f64))
+    Ok((heatmap, diff_sum / total as f64, active as f64 / total as f64))
 }
 
 fn aggressiveness_from_config(config: &Config) -> f64 {
@@ -692,6 +712,56 @@ fn aggressiveness_from_config(config: &Config) -> f64 {
     let cleanup = (config.cleanup_mode.min(1) as f64 / 1.0) * 0.10;
     let denoise = (config.prefilter_mode.min(1) as f64 / 1.0) * 0.05;
     clamp01(repair + palette_cleanup + cleanup + denoise)
+}
+
+fn compute_grid_regularity(cuts: &[usize], step: f64) -> f64 {
+    if cuts.len() < 2 || !step.is_finite() || step <= 0.0 {
+        return 0.0;
+    }
+    let mut deltas = Vec::with_capacity(cuts.len().saturating_sub(1));
+    for pair in cuts.windows(2) {
+        let delta = pair[1].saturating_sub(pair[0]) as f64;
+        if delta > 0.0 {
+            deltas.push(delta);
+        }
+    }
+    if deltas.is_empty() {
+        return 0.0;
+    }
+    let mean = deltas.iter().sum::<f64>() / deltas.len() as f64;
+    if mean <= 0.0 {
+        return 0.0;
+    }
+    let variance = deltas
+        .iter()
+        .map(|d| {
+            let v = *d - mean;
+            v * v
+        })
+        .sum::<f64>()
+        / deltas.len() as f64;
+    let stddev = variance.sqrt();
+    let cv = stddev / step.max(mean).max(1.0);
+    clamp01(1.0 - cv.min(1.0))
+}
+
+fn compute_coverage_ratio(img: &RgbaImage) -> f64 {
+    let total = (img.width() as usize).saturating_mul(img.height() as usize).max(1);
+    let opaque = img.pixels().filter(|p| p.0[3] > 0).count();
+    opaque as f64 / total as f64
+}
+
+fn compute_palette_compactness(palette_len: usize, target_colors: usize) -> f64 {
+    if palette_len == 0 {
+        return 1.0;
+    }
+    if target_colors == 0 {
+        return 0.0;
+    }
+    if palette_len <= target_colors {
+        return 1.0;
+    }
+    clamp01(target_colors as f64 / palette_len as f64)
 }
 
 pub fn recommend_variant_for_image_bytes(
@@ -781,6 +851,16 @@ pub struct DebugPaletteEntry {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct DebugQualityReport {
+    pub diff_score: f64,
+    pub diff_area: f64,
+    pub grid_regularity: f64,
+    pub palette_compactness: f64,
+    pub coverage_ratio: f64,
+    pub overall_score: f64,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct DebugReport {
     pub input_width: u32,
     pub input_height: u32,
@@ -791,6 +871,7 @@ pub struct DebugReport {
     pub col_cuts: Vec<usize>,
     pub row_cuts: Vec<usize>,
     pub palette: Vec<DebugPaletteEntry>,
+    pub quality: DebugQualityReport,
     pub config: EffectiveConfigReport,
 }
 
@@ -799,6 +880,7 @@ pub struct DebugReport {
 pub struct DebugExportOptions {
     pub write_json: bool,
     pub write_overlay: bool,
+    pub write_heatmap: bool,
     pub output_dir: Option<PathBuf>,
 }
 
@@ -906,6 +988,7 @@ pub enum BatchEvent {
 struct DebugOutput {
     output_bytes: Vec<u8>,
     overlay_bytes: Vec<u8>,
+    heatmap_bytes: Vec<u8>,
     report: DebugReport,
 }
 
@@ -1030,10 +1113,17 @@ fn process_image_bytes_debug_common(
     overlay_img
         .write_to(&mut overlay_cursor, image::ImageFormat::Png)
         .map_err(PixelSnapperError::ImageError)?;
+    let (heatmap_img, diff_score, diff_area) = build_diff_heatmap_centered(&rgba_img, &output_img)?;
+    let mut heatmap_bytes = Vec::new();
+    let mut heatmap_cursor = std::io::Cursor::new(&mut heatmap_bytes);
+    heatmap_img
+        .write_to(&mut heatmap_cursor, image::ImageFormat::Png)
+        .map_err(PixelSnapperError::ImageError)?;
 
     Ok(DebugOutput {
         output_bytes,
         overlay_bytes,
+        heatmap_bytes,
         report: build_debug_report(
             &config,
             locked_palette_rgb.as_ref().map(|v| v.len()).unwrap_or(0),
@@ -1044,6 +1134,8 @@ fn process_image_bytes_debug_common(
             step_x,
             step_y,
             &output_img,
+            diff_score,
+            diff_area,
         ),
     })
 }
@@ -1075,9 +1167,195 @@ pub fn process_image_bytes_with_config(input_bytes: &[u8], config: Config) -> Re
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-pub fn process_image_debug_with_config(input_bytes: &[u8], config: Config) -> Result<(Vec<u8>, Vec<u8>, DebugReport)> {
+pub fn process_image_debug_with_config(
+    input_bytes: &[u8],
+    config: Config,
+) -> Result<(Vec<u8>, Vec<u8>, Vec<u8>, DebugReport)> {
     let out = process_image_bytes_debug_common(input_bytes, Some(config), None)?;
-    Ok((out.output_bytes, out.overlay_bytes, out.report))
+    Ok((out.output_bytes, out.overlay_bytes, out.heatmap_bytes, out.report))
+}
+
+#[cfg(target_arch = "wasm32")]
+fn debug_output_to_js(out: DebugOutput) -> std::result::Result<wasm_bindgen::JsValue, wasm_bindgen::JsValue> {
+    let obj = Object::new();
+    let palette = Array::new();
+    let config_obj = Object::new();
+    let quality_obj = Object::new();
+
+    let bytes = Uint8Array::from(out.output_bytes.as_slice());
+    let overlay = Uint8Array::from(out.overlay_bytes.as_slice());
+    let heatmap = Uint8Array::from(out.heatmap_bytes.as_slice());
+    let cols = Uint32Array::new_with_length(out.report.col_cuts.len() as u32);
+    for (i, v) in out.report.col_cuts.iter().enumerate() {
+        cols.set_index(i as u32, *v as u32);
+    }
+    let rows = Uint32Array::new_with_length(out.report.row_cuts.len() as u32);
+    for (i, v) in out.report.row_cuts.iter().enumerate() {
+        rows.set_index(i as u32, *v as u32);
+    }
+    for entry in &out.report.palette {
+        let palette_entry = Object::new();
+        Reflect::set(&palette_entry, &JsValue::from_str("r"), &JsValue::from_f64(entry.r as f64))?;
+        Reflect::set(&palette_entry, &JsValue::from_str("g"), &JsValue::from_f64(entry.g as f64))?;
+        Reflect::set(&palette_entry, &JsValue::from_str("b"), &JsValue::from_f64(entry.b as f64))?;
+        Reflect::set(&palette_entry, &JsValue::from_str("a"), &JsValue::from_f64(entry.a as f64))?;
+        Reflect::set(
+            &palette_entry,
+            &JsValue::from_str("count"),
+            &JsValue::from_f64(entry.count as f64),
+        )?;
+        Reflect::set(
+            &palette_entry,
+            &JsValue::from_str("hex"),
+            &JsValue::from_str(&entry.hex),
+        )?;
+        palette.push(&palette_entry);
+    }
+
+    Reflect::set(
+        &config_obj,
+        &JsValue::from_str("k_colors"),
+        &JsValue::from_f64(out.report.config.k_colors as f64),
+    )?;
+    if let Some(pixel_size_override) = out.report.config.pixel_size_override {
+        Reflect::set(
+            &config_obj,
+            &JsValue::from_str("pixel_size_override"),
+            &JsValue::from_f64(pixel_size_override),
+        )?;
+    }
+    Reflect::set(
+        &config_obj,
+        &JsValue::from_str("pixel_size_override_used"),
+        &JsValue::from_bool(out.report.config.pixel_size_override_used),
+    )?;
+    Reflect::set(
+        &config_obj,
+        &JsValue::from_str("palette_lock_used"),
+        &JsValue::from_bool(out.report.config.palette_lock_used),
+    )?;
+    Reflect::set(
+        &config_obj,
+        &JsValue::from_str("palette_lock_size"),
+        &JsValue::from_f64(out.report.config.palette_lock_size as f64),
+    )?;
+    Reflect::set(
+        &config_obj,
+        &JsValue::from_str("prefilter_mode"),
+        &JsValue::from_str(out.report.config.prefilter_mode),
+    )?;
+    Reflect::set(
+        &config_obj,
+        &JsValue::from_str("palette_source"),
+        &JsValue::from_str(out.report.config.palette_source),
+    )?;
+    Reflect::set(
+        &config_obj,
+        &JsValue::from_str("palette_cleanup_mode"),
+        &JsValue::from_str(out.report.config.palette_cleanup_mode),
+    )?;
+    Reflect::set(
+        &config_obj,
+        &JsValue::from_str("cell_color_mode"),
+        &JsValue::from_str(out.report.config.cell_color_mode),
+    )?;
+    Reflect::set(
+        &config_obj,
+        &JsValue::from_str("dither_mode"),
+        &JsValue::from_str(out.report.config.dither_mode),
+    )?;
+    Reflect::set(
+        &config_obj,
+        &JsValue::from_str("color_space"),
+        &JsValue::from_str(out.report.config.color_space),
+    )?;
+    Reflect::set(
+        &config_obj,
+        &JsValue::from_str("cleanup_mode"),
+        &JsValue::from_str(out.report.config.cleanup_mode),
+    )?;
+    Reflect::set(
+        &config_obj,
+        &JsValue::from_str("repair_mode"),
+        &JsValue::from_str(out.report.config.repair_mode),
+    )?;
+
+    Reflect::set(
+        &quality_obj,
+        &JsValue::from_str("diff_score"),
+        &JsValue::from_f64(out.report.quality.diff_score),
+    )?;
+    Reflect::set(
+        &quality_obj,
+        &JsValue::from_str("diff_area"),
+        &JsValue::from_f64(out.report.quality.diff_area),
+    )?;
+    Reflect::set(
+        &quality_obj,
+        &JsValue::from_str("grid_regularity"),
+        &JsValue::from_f64(out.report.quality.grid_regularity),
+    )?;
+    Reflect::set(
+        &quality_obj,
+        &JsValue::from_str("palette_compactness"),
+        &JsValue::from_f64(out.report.quality.palette_compactness),
+    )?;
+    Reflect::set(
+        &quality_obj,
+        &JsValue::from_str("coverage_ratio"),
+        &JsValue::from_f64(out.report.quality.coverage_ratio),
+    )?;
+    Reflect::set(
+        &quality_obj,
+        &JsValue::from_str("overall_score"),
+        &JsValue::from_f64(out.report.quality.overall_score),
+    )?;
+
+    Reflect::set(&obj, &JsValue::from_str("bytes"), &bytes.into())?;
+    Reflect::set(&obj, &JsValue::from_str("overlay_bytes"), &overlay.into())?;
+    Reflect::set(&obj, &JsValue::from_str("heatmap_bytes"), &heatmap.into())?;
+    Reflect::set(&obj, &JsValue::from_str("col_cuts"), &cols.into())?;
+    Reflect::set(&obj, &JsValue::from_str("row_cuts"), &rows.into())?;
+    Reflect::set(
+        &obj,
+        &JsValue::from_str("step_x"),
+        &JsValue::from_f64(out.report.step_x),
+    )?;
+    Reflect::set(
+        &obj,
+        &JsValue::from_str("step_y"),
+        &JsValue::from_f64(out.report.step_y),
+    )?;
+    Reflect::set(
+        &obj,
+        &JsValue::from_str("input_width"),
+        &JsValue::from_f64(out.report.input_width as f64),
+    )?;
+    Reflect::set(
+        &obj,
+        &JsValue::from_str("input_height"),
+        &JsValue::from_f64(out.report.input_height as f64),
+    )?;
+    Reflect::set(
+        &obj,
+        &JsValue::from_str("output_width"),
+        &JsValue::from_f64(out.report.output_width as f64),
+    )?;
+    Reflect::set(
+        &obj,
+        &JsValue::from_str("output_height"),
+        &JsValue::from_f64(out.report.output_height as f64),
+    )?;
+    Reflect::set(&obj, &JsValue::from_str("palette"), &palette.into())?;
+    Reflect::set(
+        &obj,
+        &JsValue::from_str("palette_count"),
+        &JsValue::from_f64(out.report.palette.len() as f64),
+    )?;
+    Reflect::set(&obj, &JsValue::from_str("config"), &config_obj.into())?;
+    Reflect::set(&obj, &JsValue::from_str("quality"), &quality_obj.into())?;
+
+    Ok(obj.into())
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -1441,171 +1719,7 @@ pub fn process_image_debug(
 
     let out = process_image_bytes_debug_common(input_bytes, Some(config), None)
         .map_err(|e| wasm_bindgen::JsValue::from(e))?;
-
-    let obj = Object::new();
-    let palette = Array::new();
-    let config_obj = Object::new();
-
-    let bytes = Uint8Array::from(out.output_bytes.as_slice());
-    let overlay = Uint8Array::from(out.overlay_bytes.as_slice());
-    let cols = Uint32Array::new_with_length(out.report.col_cuts.len() as u32);
-    for (i, v) in out.report.col_cuts.iter().enumerate() {
-        cols.set_index(i as u32, *v as u32);
-    }
-    let rows = Uint32Array::new_with_length(out.report.row_cuts.len() as u32);
-    for (i, v) in out.report.row_cuts.iter().enumerate() {
-        rows.set_index(i as u32, *v as u32);
-    }
-    for entry in &out.report.palette {
-        let palette_entry = Object::new();
-        Reflect::set(
-            &palette_entry,
-            &JsValue::from_str("r"),
-            &JsValue::from_f64(entry.r as f64),
-        )?;
-        Reflect::set(
-            &palette_entry,
-            &JsValue::from_str("g"),
-            &JsValue::from_f64(entry.g as f64),
-        )?;
-        Reflect::set(
-            &palette_entry,
-            &JsValue::from_str("b"),
-            &JsValue::from_f64(entry.b as f64),
-        )?;
-        Reflect::set(
-            &palette_entry,
-            &JsValue::from_str("a"),
-            &JsValue::from_f64(entry.a as f64),
-        )?;
-        Reflect::set(
-            &palette_entry,
-            &JsValue::from_str("count"),
-            &JsValue::from_f64(entry.count as f64),
-        )?;
-        Reflect::set(
-            &palette_entry,
-            &JsValue::from_str("hex"),
-            &JsValue::from_str(&entry.hex),
-        )?;
-        palette.push(&palette_entry);
-    }
-
-    Reflect::set(
-        &config_obj,
-        &JsValue::from_str("k_colors"),
-        &JsValue::from_f64(out.report.config.k_colors as f64),
-    )?;
-    if let Some(pixel_size_override) = out.report.config.pixel_size_override {
-        Reflect::set(
-            &config_obj,
-            &JsValue::from_str("pixel_size_override"),
-            &JsValue::from_f64(pixel_size_override),
-        )?;
-    }
-    Reflect::set(
-        &config_obj,
-        &JsValue::from_str("pixel_size_override_used"),
-        &JsValue::from_bool(out.report.config.pixel_size_override_used),
-    )?;
-    Reflect::set(
-        &config_obj,
-        &JsValue::from_str("palette_lock_used"),
-        &JsValue::from_bool(out.report.config.palette_lock_used),
-    )?;
-    Reflect::set(
-        &config_obj,
-        &JsValue::from_str("palette_lock_size"),
-        &JsValue::from_f64(out.report.config.palette_lock_size as f64),
-    )?;
-    Reflect::set(
-        &config_obj,
-        &JsValue::from_str("prefilter_mode"),
-        &JsValue::from_str(out.report.config.prefilter_mode),
-    )?;
-    Reflect::set(
-        &config_obj,
-        &JsValue::from_str("palette_source"),
-        &JsValue::from_str(out.report.config.palette_source),
-    )?;
-    Reflect::set(
-        &config_obj,
-        &JsValue::from_str("palette_cleanup_mode"),
-        &JsValue::from_str(out.report.config.palette_cleanup_mode),
-    )?;
-    Reflect::set(
-        &config_obj,
-        &JsValue::from_str("cell_color_mode"),
-        &JsValue::from_str(out.report.config.cell_color_mode),
-    )?;
-    Reflect::set(
-        &config_obj,
-        &JsValue::from_str("dither_mode"),
-        &JsValue::from_str(out.report.config.dither_mode),
-    )?;
-    Reflect::set(
-        &config_obj,
-        &JsValue::from_str("color_space"),
-        &JsValue::from_str(out.report.config.color_space),
-    )?;
-    Reflect::set(
-        &config_obj,
-        &JsValue::from_str("cleanup_mode"),
-        &JsValue::from_str(out.report.config.cleanup_mode),
-    )?;
-    Reflect::set(
-        &config_obj,
-        &JsValue::from_str("repair_mode"),
-        &JsValue::from_str(out.report.config.repair_mode),
-    )?;
-
-    Reflect::set(&obj, &JsValue::from_str("bytes"), &bytes.into())?;
-    Reflect::set(&obj, &JsValue::from_str("overlay_bytes"), &overlay.into())?;
-    Reflect::set(&obj, &JsValue::from_str("col_cuts"), &cols.into())?;
-    Reflect::set(&obj, &JsValue::from_str("row_cuts"), &rows.into())?;
-    Reflect::set(
-        &obj,
-        &JsValue::from_str("step_x"),
-        &JsValue::from_f64(out.report.step_x),
-    )?;
-    Reflect::set(
-        &obj,
-        &JsValue::from_str("step_y"),
-        &JsValue::from_f64(out.report.step_y),
-    )?;
-    Reflect::set(
-        &obj,
-        &JsValue::from_str("input_width"),
-        &JsValue::from_f64(out.report.input_width as f64),
-    )?;
-    Reflect::set(
-        &obj,
-        &JsValue::from_str("input_height"),
-        &JsValue::from_f64(out.report.input_height as f64),
-    )?;
-    Reflect::set(
-        &obj,
-        &JsValue::from_str("output_width"),
-        &JsValue::from_f64(out.report.output_width as f64),
-    )?;
-    Reflect::set(
-        &obj,
-        &JsValue::from_str("output_height"),
-        &JsValue::from_f64(out.report.output_height as f64),
-    )?;
-    Reflect::set(&obj, &JsValue::from_str("palette"), &palette.into())?;
-    Reflect::set(
-        &obj,
-        &JsValue::from_str("palette_count"),
-        &JsValue::from_f64(out.report.palette.len() as f64),
-    )?;
-    Reflect::set(
-        &obj,
-        &JsValue::from_str("config"),
-        &config_obj.into(),
-    )?;
-
-    Ok(obj.into())
+    debug_output_to_js(out)
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -1715,142 +1829,9 @@ pub fn process_image_debug_with_palette_image(
 
     let out = process_image_bytes_debug_common(input_bytes, Some(config), Some(palette_image_bytes))
         .map_err(|e| wasm_bindgen::JsValue::from(e))?;
+    debug_output_to_js(out)
+}
 
-    let obj = Object::new();
-    let palette = Array::new();
-    let config_obj = Object::new();
-
-    let bytes = Uint8Array::from(out.output_bytes.as_slice());
-    let overlay = Uint8Array::from(out.overlay_bytes.as_slice());
-    let cols = Uint32Array::new_with_length(out.report.col_cuts.len() as u32);
-    for (i, v) in out.report.col_cuts.iter().enumerate() {
-        cols.set_index(i as u32, *v as u32);
-    }
-    let rows = Uint32Array::new_with_length(out.report.row_cuts.len() as u32);
-    for (i, v) in out.report.row_cuts.iter().enumerate() {
-        rows.set_index(i as u32, *v as u32);
-    }
-    for entry in &out.report.palette {
-        let palette_entry = Object::new();
-        Reflect::set(&palette_entry, &JsValue::from_str("r"), &JsValue::from_f64(entry.r as f64))?;
-        Reflect::set(&palette_entry, &JsValue::from_str("g"), &JsValue::from_f64(entry.g as f64))?;
-        Reflect::set(&palette_entry, &JsValue::from_str("b"), &JsValue::from_f64(entry.b as f64))?;
-        Reflect::set(&palette_entry, &JsValue::from_str("a"), &JsValue::from_f64(entry.a as f64))?;
-        Reflect::set(
-            &palette_entry,
-            &JsValue::from_str("count"),
-            &JsValue::from_f64(entry.count as f64),
-        )?;
-        Reflect::set(
-            &palette_entry,
-            &JsValue::from_str("hex"),
-            &JsValue::from_str(&entry.hex),
-        )?;
-        palette.push(&palette_entry);
-    }
-
-    Reflect::set(
-        &config_obj,
-        &JsValue::from_str("k_colors"),
-        &JsValue::from_f64(out.report.config.k_colors as f64),
-    )?;
-    if let Some(pixel_size_override) = out.report.config.pixel_size_override {
-        Reflect::set(
-            &config_obj,
-            &JsValue::from_str("pixel_size_override"),
-            &JsValue::from_f64(pixel_size_override),
-        )?;
-    }
-    Reflect::set(
-        &config_obj,
-        &JsValue::from_str("pixel_size_override_used"),
-        &JsValue::from_bool(out.report.config.pixel_size_override_used),
-    )?;
-    Reflect::set(
-        &config_obj,
-        &JsValue::from_str("palette_lock_used"),
-        &JsValue::from_bool(out.report.config.palette_lock_used),
-    )?;
-    Reflect::set(
-        &config_obj,
-        &JsValue::from_str("palette_lock_size"),
-        &JsValue::from_f64(out.report.config.palette_lock_size as f64),
-    )?;
-    Reflect::set(
-        &config_obj,
-        &JsValue::from_str("prefilter_mode"),
-        &JsValue::from_str(out.report.config.prefilter_mode),
-    )?;
-    Reflect::set(
-        &config_obj,
-        &JsValue::from_str("palette_source"),
-        &JsValue::from_str(out.report.config.palette_source),
-    )?;
-    Reflect::set(
-        &config_obj,
-        &JsValue::from_str("palette_cleanup_mode"),
-        &JsValue::from_str(out.report.config.palette_cleanup_mode),
-    )?;
-    Reflect::set(
-        &config_obj,
-        &JsValue::from_str("cell_color_mode"),
-        &JsValue::from_str(out.report.config.cell_color_mode),
-    )?;
-    Reflect::set(
-        &config_obj,
-        &JsValue::from_str("dither_mode"),
-        &JsValue::from_str(out.report.config.dither_mode),
-    )?;
-    Reflect::set(
-        &config_obj,
-        &JsValue::from_str("color_space"),
-        &JsValue::from_str(out.report.config.color_space),
-    )?;
-    Reflect::set(
-        &config_obj,
-        &JsValue::from_str("cleanup_mode"),
-        &JsValue::from_str(out.report.config.cleanup_mode),
-    )?;
-    Reflect::set(
-        &config_obj,
-        &JsValue::from_str("repair_mode"),
-        &JsValue::from_str(out.report.config.repair_mode),
-    )?;
-
-    Reflect::set(&obj, &JsValue::from_str("bytes"), &bytes.into())?;
-    Reflect::set(&obj, &JsValue::from_str("overlay_bytes"), &overlay.into())?;
-    Reflect::set(&obj, &JsValue::from_str("col_cuts"), &cols.into())?;
-    Reflect::set(&obj, &JsValue::from_str("row_cuts"), &rows.into())?;
-    Reflect::set(&obj, &JsValue::from_str("step_x"), &JsValue::from_f64(out.report.step_x))?;
-    Reflect::set(&obj, &JsValue::from_str("step_y"), &JsValue::from_f64(out.report.step_y))?;
-    Reflect::set(
-        &obj,
-        &JsValue::from_str("input_width"),
-        &JsValue::from_f64(out.report.input_width as f64),
-    )?;
-    Reflect::set(
-        &obj,
-        &JsValue::from_str("input_height"),
-        &JsValue::from_f64(out.report.input_height as f64),
-    )?;
-    Reflect::set(
-        &obj,
-        &JsValue::from_str("output_width"),
-        &JsValue::from_f64(out.report.output_width as f64),
-    )?;
-    Reflect::set(
-        &obj,
-        &JsValue::from_str("output_height"),
-        &JsValue::from_f64(out.report.output_height as f64),
-    )?;
-    Reflect::set(&obj, &JsValue::from_str("palette"), &palette.into())?;
-    Reflect::set(
-        &obj,
-        &JsValue::from_str("palette_count"),
-        &JsValue::from_f64(out.report.palette.len() as f64),
-    )?;
-    Reflect::set(&obj, &JsValue::from_str("config"), &config_obj.into())?;
-    Ok(obj.into())
 }
 
 fn build_debug_report(
@@ -1863,9 +1844,25 @@ fn build_debug_report(
     step_x: f64,
     step_y: f64,
     output_img: &RgbaImage,
+    diff_score: f64,
+    diff_area: f64,
 ) -> DebugReport {
     let output_width = col_cuts.len().saturating_sub(1) as u32;
     let output_height = row_cuts.len().saturating_sub(1) as u32;
+    let palette = extract_palette(output_img);
+    let grid_regularity = (
+        compute_grid_regularity(&col_cuts, step_x) + compute_grid_regularity(&row_cuts, step_y)
+    ) * 0.5;
+    let palette_compactness = compute_palette_compactness(palette.len(), config.k_colors);
+    let coverage_ratio = compute_coverage_ratio(output_img);
+    let fidelity_score = 1.0
+        - ((diff_score / 96.0).clamp(0.0, 1.0) * 0.7 + (diff_area / 0.45).clamp(0.0, 1.0) * 0.3);
+    let overall_score = clamp01(
+        grid_regularity * 0.35
+            + palette_compactness * 0.20
+            + coverage_ratio * 0.10
+            + fidelity_score * 0.35,
+    );
 
     DebugReport {
         input_width,
@@ -1876,7 +1873,15 @@ fn build_debug_report(
         step_y,
         col_cuts,
         row_cuts,
-        palette: extract_palette(output_img),
+        palette,
+        quality: DebugQualityReport {
+            diff_score,
+            diff_area,
+            grid_regularity,
+            palette_compactness,
+            coverage_ratio,
+            overall_score,
+        },
         config: EffectiveConfigReport {
             k_colors: config.k_colors,
             pixel_size_override: config.pixel_size_override,
@@ -2335,6 +2340,7 @@ fn process_file_with_debug_exports_internal(
     let out = process_image_bytes_debug_common(&img_bytes, Some(config.clone()), palette_lock_image_bytes)?;
     let output_bytes = out.output_bytes;
     let overlay_bytes = out.overlay_bytes;
+    let heatmap_bytes = out.heatmap_bytes;
     let report = out.report;
 
     if let Some(parent) = output_path.parent() {
@@ -2362,6 +2368,7 @@ fn process_file_with_debug_exports_internal(
         debug_relative_dir,
         &report,
         &overlay_bytes,
+        &heatmap_bytes,
     )?;
 
     Ok(ProcessedImage {
@@ -2400,8 +2407,9 @@ fn write_debug_exports(
     debug_relative_dir: Option<&Path>,
     report: &DebugReport,
     overlay_bytes: &[u8],
+    heatmap_bytes: &[u8],
 ) -> Result<()> {
-    if !debug.write_json && !debug.write_overlay {
+    if !debug.write_json && !debug.write_overlay && !debug.write_heatmap {
         return Ok(());
     }
 
@@ -2458,6 +2466,17 @@ fn write_debug_exports(
             PixelSnapperError::ProcessingError(format!(
                 "Failed to write debug overlay '{}': {}",
                 overlay_path.display(),
+                e
+            ))
+        })?;
+    }
+
+    if debug.write_heatmap {
+        let heatmap_path = base_dir.join(format!("{}.heatmap.png", stem));
+        std::fs::write(&heatmap_path, heatmap_bytes).map_err(|e| {
+            PixelSnapperError::ProcessingError(format!(
+                "Failed to write debug heatmap '{}': {}",
+                heatmap_path.display(),
                 e
             ))
         })?;

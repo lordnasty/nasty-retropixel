@@ -21,6 +21,7 @@ const els = {
   downloadBtn: document.getElementById("downloadBtn"),
   downloadDebugBtn: document.getElementById("downloadDebugBtn"),
   downloadOverlayBtn: document.getElementById("downloadOverlayBtn"),
+  downloadHeatmapBtn: document.getElementById("downloadHeatmapBtn"),
   downloadAllBtn: document.getElementById("downloadAllBtn"),
   status: document.getElementById("status"),
   presetSuggestion: document.getElementById("presetSuggestion"),
@@ -106,6 +107,7 @@ const REQUIRED_KEYS = [
   "downloadBtn",
   "downloadDebugBtn",
   "downloadOverlayBtn",
+  "downloadHeatmapBtn",
   "downloadAllBtn",
   "status",
   "presetSuggestion",
@@ -191,6 +193,7 @@ let inputUrl = null;
 let outputUrl = null;
 let debugUrl = null;
 let overlayUrl = null;
+let heatmapUrl = null;
 let batchResults = [];
 let lastDebug = null;
 let compareDragging = false;
@@ -269,6 +272,11 @@ function setDebugDownloadEnabled(enabled) {
 function setOverlayDownloadEnabled(enabled) {
   els.downloadOverlayBtn.classList.toggle("disabled", !enabled);
   if (!enabled) els.downloadOverlayBtn.removeAttribute("href");
+}
+
+function setHeatmapDownloadEnabled(enabled) {
+  els.downloadHeatmapBtn.classList.toggle("disabled", !enabled);
+  if (!enabled) els.downloadHeatmapBtn.removeAttribute("href");
 }
 
 function setVariantCompareStatus(text, isError = false) {
@@ -671,8 +679,14 @@ function updateDebugSummary(debug) {
   const outputHeight = Number(debug.output_height ?? 0);
   const paletteCount = Array.isArray(debug.palette) ? debug.palette.length : Number(debug.palette_count ?? 0);
   const config = debug.config ?? {};
+  const quality = debug.quality ?? {};
   const paletteLockUsed = Boolean(config.palette_lock_used ?? false);
   const paletteLockSize = Number(config.palette_lock_size ?? 0);
+  const overallPct = Math.round(Number(quality.overall_score ?? 0) * 100);
+  const gridPct = Math.round(Number(quality.grid_regularity ?? 0) * 100);
+  const palettePct = Math.round(Number(quality.palette_compactness ?? 0) * 100);
+  const diffScore = Number(quality.diff_score ?? 0);
+  const diffArea = Math.round(Number(quality.diff_area ?? 0) * 100);
 
   els.debugPixelSize.textContent = `${stepX.toFixed(1)} x ${stepY.toFixed(1)} px`;
   els.debugGridSize.textContent = outputWidth > 0 && outputHeight > 0 ? `${outputWidth} x ${outputHeight}` : "-";
@@ -681,7 +695,8 @@ function updateDebugSummary(debug) {
     `${paletteLockUsed ? `lock ${paletteLockSize}` : "lock off"} | prefilter ${config.prefilter_mode ?? "off"} | palette ${config.palette_source ?? "cells"} | ` +
     `palette-fix ${config.palette_cleanup_mode ?? "basic"} | cella ${config.cell_color_mode ?? "dominant"} | ` +
     `dither ${config.dither_mode ?? "off"} | spazio ${config.color_space ?? "linear"} | ` +
-    `cleanup ${config.cleanup_mode ?? "basic"} | repair ${config.repair_mode ?? "smart"}`;
+    `cleanup ${config.cleanup_mode ?? "basic"} | repair ${config.repair_mode ?? "smart"} | ` +
+    `quality ${overallPct}% | grid ${gridPct}% | palette ${palettePct}% | diff ${diffScore.toFixed(1)} / ${diffArea}%`;
 }
 
 function normalizeDebugResult(dbg, k) {
@@ -689,6 +704,7 @@ function normalizeDebugResult(dbg, k) {
   const row = Array.from(dbg.row_cuts ?? []);
   return {
     overlayBytes: new Uint8Array(dbg.overlay_bytes ?? []),
+    heatmapBytes: new Uint8Array(dbg.heatmap_bytes ?? []),
     debug: {
       palette: Array.from(dbg.palette ?? []).map((entry) => ({
         r: Number(entry.r ?? 0),
@@ -707,6 +723,14 @@ function normalizeDebugResult(dbg, k) {
       output_height: Number(dbg.output_height ?? 0),
       step_x: Number(dbg.step_x ?? 0),
       step_y: Number(dbg.step_y ?? 0),
+      quality: {
+        diff_score: Number(dbg.quality?.diff_score ?? 0),
+        diff_area: Number(dbg.quality?.diff_area ?? 0),
+        grid_regularity: Number(dbg.quality?.grid_regularity ?? 0),
+        palette_compactness: Number(dbg.quality?.palette_compactness ?? 0),
+        coverage_ratio: Number(dbg.quality?.coverage_ratio ?? 0),
+        overall_score: Number(dbg.quality?.overall_score ?? 0),
+      },
       config: {
         k_colors: Number(dbg.config?.k_colors ?? k),
         pixel_size_override: dbg.config?.pixel_size_override ?? null,
@@ -1123,6 +1147,10 @@ function toZipDebugName(originalName) {
 
 function toZipOverlayName(originalName) {
   return `${toZipBaseName(originalName)}.overlay.png`;
+}
+
+function toZipHeatmapName(originalName) {
+  return `${toZipBaseName(originalName)}.heatmap.png`;
 }
 
 function buildZipStore(entries) {
@@ -1712,8 +1740,10 @@ async function promoteVariantResult(result) {
 
   revokeUrl(debugUrl);
   revokeUrl(overlayUrl);
+  revokeUrl(heatmapUrl);
   debugUrl = null;
   overlayUrl = null;
+  heatmapUrl = null;
   if (lastDebug) {
     const debugBlob = new Blob([JSON.stringify(lastDebug, null, 2)], {
       type: "application/json",
@@ -1729,9 +1759,18 @@ async function promoteVariantResult(result) {
     } else {
       setOverlayDownloadEnabled(false);
     }
+    if (result.heatmapBytes && result.heatmapBytes.length > 0) {
+      const heatmapBlob = new Blob([result.heatmapBytes], { type: "image/png" });
+      heatmapUrl = URL.createObjectURL(heatmapBlob);
+      els.downloadHeatmapBtn.href = heatmapUrl;
+      setHeatmapDownloadEnabled(true);
+    } else {
+      setHeatmapDownloadEnabled(false);
+    }
   } else {
     setDebugDownloadEnabled(false);
     setOverlayDownloadEnabled(false);
+    setHeatmapDownloadEnabled(false);
   }
 
   await applyPreset(result.plan.presetKey);
@@ -2126,15 +2165,18 @@ function setSelectedFiles(files) {
   revokeUrl(outputUrl);
   revokeUrl(debugUrl);
   revokeUrl(overlayUrl);
+  revokeUrl(heatmapUrl);
   inputUrl = null;
   outputUrl = null;
   debugUrl = null;
   overlayUrl = null;
+  heatmapUrl = null;
 
   els.outputPreview.removeAttribute("src");
   setDownloadEnabled(false);
   setDebugDownloadEnabled(false);
   setOverlayDownloadEnabled(false);
+  setHeatmapDownloadEnabled(false);
   setDownloadAllEnabled(false);
   els.compareOutput.removeAttribute("src");
   els.compareInput.removeAttribute("src");
@@ -2495,8 +2537,10 @@ els.processBtn.addEventListener("click", async () => {
       setDownloadAllEnabled(true);
       revokeUrl(debugUrl);
       revokeUrl(overlayUrl);
+      revokeUrl(heatmapUrl);
       debugUrl = null;
       overlayUrl = null;
+      heatmapUrl = null;
       if (lastDebug) {
         const debugBlob = new Blob([JSON.stringify(lastDebug, null, 2)], {
           type: "application/json",
@@ -2512,9 +2556,18 @@ els.processBtn.addEventListener("click", async () => {
         } else {
           setOverlayDownloadEnabled(false);
         }
+        if (result.heatmapBytes && result.heatmapBytes.length > 0) {
+          const heatmapBlob = new Blob([result.heatmapBytes], { type: "image/png" });
+          heatmapUrl = URL.createObjectURL(heatmapBlob);
+          els.downloadHeatmapBtn.href = heatmapUrl;
+          setHeatmapDownloadEnabled(true);
+        } else {
+          setHeatmapDownloadEnabled(false);
+        }
       } else {
         setDebugDownloadEnabled(false);
         setOverlayDownloadEnabled(false);
+        setHeatmapDownloadEnabled(false);
       }
       setStatus("Fatto.");
       updateCompare();
@@ -2548,6 +2601,7 @@ els.processBtn.addEventListener("click", async () => {
           url,
           debug: result.debug ?? null,
           overlayBytes: result.overlayBytes ?? null,
+          heatmapBytes: result.heatmapBytes ?? null,
         });
         it.ui.statusEl.textContent = "ok";
       } catch (e) {
@@ -2559,10 +2613,13 @@ els.processBtn.addEventListener("click", async () => {
     clearDebugSummary();
     revokeUrl(debugUrl);
     revokeUrl(overlayUrl);
+    revokeUrl(heatmapUrl);
     debugUrl = null;
     overlayUrl = null;
+    heatmapUrl = null;
     setDebugDownloadEnabled(false);
     setOverlayDownloadEnabled(false);
+    setHeatmapDownloadEnabled(false);
 
     const firstOk = batchResults[0] ?? null;
     if (firstOk) {
@@ -2610,11 +2667,17 @@ els.downloadAllBtn.addEventListener("click", async () => {
       const enc = new TextEncoder();
       const entries = [];
       for (const r of batchResults) {
-        entries.push({ name: toZipEntryName(r.name), bytes: r.bytes });
+        entries.push({ name: toZipEntryName(r.path || r.name), bytes: r.bytes });
         if (includeDebug && r.debug) {
-          entries.push({ name: toZipDebugName(r.name), bytes: enc.encode(JSON.stringify(r.debug, null, 2)) });
+          entries.push({
+            name: toZipDebugName(r.path || r.name),
+            bytes: enc.encode(JSON.stringify(r.debug, null, 2)),
+          });
           if (r.overlayBytes && r.overlayBytes.length > 0) {
-            entries.push({ name: toZipOverlayName(r.name), bytes: r.overlayBytes });
+            entries.push({ name: toZipOverlayName(r.path || r.name), bytes: r.overlayBytes });
+          }
+          if (r.heatmapBytes && r.heatmapBytes.length > 0) {
+            entries.push({ name: toZipHeatmapName(r.path || r.name), bytes: r.heatmapBytes });
           }
         }
       }
@@ -2668,5 +2731,6 @@ window.addEventListener("beforeunload", () => {
   revokeUrl(outputUrl);
   revokeUrl(debugUrl);
   revokeUrl(overlayUrl);
+  revokeUrl(heatmapUrl);
   for (const r of batchResults) revokeUrl(r.url);
 });

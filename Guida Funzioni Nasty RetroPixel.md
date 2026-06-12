@@ -60,6 +60,8 @@ La GUI copre oggi tutte le funzioni operative principali sviluppate nel core:
 - repair strutturale `off|basic|smart|ultra`;
 - debug report JSON;
 - debug overlay PNG;
+- debug heatmap PNG;
+- metriche di qualita' nel report debug;
 - overlay griglia sull'input;
 - preview palette;
 - trim trasparenza;
@@ -69,8 +71,11 @@ La GUI copre oggi tutte le funzioni operative principali sviluppate nel core:
 
 Nota attuale:
 
-- la CLI ha ancora il workflow debug batch piu' ricco per esportazione su filesystem (`--debug-json`, `--debug-overlay`, `--debug-dir`) per intere cartelle;
-- la GUI batch e' orientata al workflow visuale e al download finale, non ancora all'export debug per-file come flusso dedicato.
+- CLI e GUI coprono entrambe debug JSON, overlay e heatmap;
+- la CLI esporta su filesystem (`--debug-json`, `--debug-overlay`, `--debug-heatmap`, `--debug-dir`);
+- la GUI esporta debug singolo via download e, in batch ZIP, include anche JSON + overlay + heatmap;
+- il batch del core e della CLI e' ricorsivo e preserva la struttura delle sottocartelle in output/debug;
+- la GUI batch preserva i path interni quando selezioni una cartella e scarichi lo ZIP.
 
 ## Funzioni Core
 
