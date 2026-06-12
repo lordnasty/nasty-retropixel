@@ -1153,6 +1153,120 @@ function toZipHeatmapName(originalName) {
   return `${toZipBaseName(originalName)}.heatmap.png`;
 }
 
+function getBatchQuality(entry) {
+  const quality = entry?.debug?.quality ?? {};
+  return {
+    overall: Number(quality.overall_score ?? NaN),
+    diffScore: Number(quality.diff_score ?? 0),
+    diffArea: Number(quality.diff_area ?? 0),
+    grid: Number(quality.grid_regularity ?? 0),
+    palette: Number(quality.palette_compactness ?? 0),
+    coverage: Number(quality.coverage_ratio ?? 0),
+  };
+}
+
+function classifyBatchQuality(overall) {
+  if (!Number.isFinite(overall)) return "is-unknown";
+  if (overall < 0.46) return "is-risky";
+  if (overall < 0.72) return "is-mid";
+  return "is-good";
+}
+
+function sortBatchResultsForReview(results) {
+  return [...(Array.isArray(results) ? results : [])].sort((a, b) => {
+    const qa = getBatchQuality(a).overall;
+    const qb = getBatchQuality(b).overall;
+    if (Number.isFinite(qa) && Number.isFinite(qb) && qa !== qb) return qa - qb;
+    if (Number.isFinite(qa) && !Number.isFinite(qb)) return -1;
+    if (!Number.isFinite(qa) && Number.isFinite(qb)) return 1;
+    return String(a.path || a.name || "").localeCompare(String(b.path || b.name || ""));
+  });
+}
+
+function buildBatchSummaryRows(results) {
+  return sortBatchResultsForReview(results).map((entry, index) => {
+    const quality = getBatchQuality(entry);
+    const config = entry.debug?.config ?? {};
+    return {
+      rank: index + 1,
+      relative_path: String(entry.path || entry.name || ""),
+      output_relative_path: toZipEntryName(entry.path || entry.name || ""),
+      quality_overall: Number.isFinite(quality.overall) ? Number(quality.overall.toFixed(4)) : null,
+      diff_score: Number(quality.diffScore.toFixed(4)),
+      diff_area: Number(quality.diffArea.toFixed(4)),
+      grid_regularity: Number(quality.grid.toFixed(4)),
+      palette_compactness: Number(quality.palette.toFixed(4)),
+      coverage_ratio: Number(quality.coverage.toFixed(4)),
+      palette_count: Number(entry.debug?.palette_count ?? entry.debug?.palette?.length ?? 0),
+      output_width: Number(entry.debug?.output_width ?? 0),
+      output_height: Number(entry.debug?.output_height ?? 0),
+      step_x: Number(Number(entry.debug?.step_x ?? 0).toFixed(4)),
+      step_y: Number(Number(entry.debug?.step_y ?? 0).toFixed(4)),
+      prefilter_mode: String(config.prefilter_mode ?? "off"),
+      palette_source: String(config.palette_source ?? "cells"),
+      palette_cleanup_mode: String(config.palette_cleanup_mode ?? "basic"),
+      cleanup_mode: String(config.cleanup_mode ?? "basic"),
+      repair_mode: String(config.repair_mode ?? "smart"),
+    };
+  });
+}
+
+function buildBatchSummaryPayload(results) {
+  const rows = buildBatchSummaryRows(results);
+  const avg = (key) =>
+    rows.length === 0
+      ? 0
+      : rows.reduce((sum, row) => sum + Number(row[key] ?? 0), 0) / rows.length;
+  return {
+    count: rows.length,
+    sorted_by: "quality_overall_asc",
+    focus: "lowest_quality_first",
+    averages: {
+      quality_overall: Number(avg("quality_overall").toFixed(4)),
+      diff_score: Number(avg("diff_score").toFixed(4)),
+      diff_area: Number(avg("diff_area").toFixed(4)),
+    },
+    worst: rows[0] ?? null,
+    best: rows[rows.length - 1] ?? null,
+    rows,
+  };
+}
+
+function csvEscape(value) {
+  const text = String(value ?? "");
+  return /[",\n\r]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+}
+
+function buildBatchSummaryCsv(results) {
+  const rows = buildBatchSummaryRows(results);
+  const header = [
+    "rank",
+    "relative_path",
+    "output_relative_path",
+    "quality_overall",
+    "diff_score",
+    "diff_area",
+    "grid_regularity",
+    "palette_compactness",
+    "coverage_ratio",
+    "palette_count",
+    "output_width",
+    "output_height",
+    "step_x",
+    "step_y",
+    "prefilter_mode",
+    "palette_source",
+    "palette_cleanup_mode",
+    "cleanup_mode",
+    "repair_mode",
+  ];
+  const lines = [header.join(",")];
+  for (const row of rows) {
+    lines.push(header.map((key) => csvEscape(row[key])).join(","));
+  }
+  return lines.join("\n");
+}
+
 function buildZipStore(entries) {
   const enc = new TextEncoder();
   const chunks = [];
@@ -1528,6 +1642,42 @@ function addBatchItem(name) {
   row.appendChild(right);
   els.batchList.appendChild(row);
   return { row, statusEl: right };
+}
+
+function renderBatchReviewList(items) {
+  clearBatchList();
+  const ordered = [...items].sort((a, b) => {
+    if (a.failed && !b.failed) return -1;
+    if (!a.failed && b.failed) return 1;
+    const qa = getBatchQuality(a.result).overall;
+    const qb = getBatchQuality(b.result).overall;
+    if (Number.isFinite(qa) && Number.isFinite(qb) && qa !== qb) return qa - qb;
+    return String(a.file?.webkitRelativePath || a.file?.name || "").localeCompare(
+      String(b.file?.webkitRelativePath || b.file?.name || ""),
+    );
+  });
+
+  for (const [index, item] of ordered.entries()) {
+    const path = item.file?.webkitRelativePath || item.file?.name || "file";
+    const ui = addBatchItem(path);
+    if (item.failed) {
+      ui.row.classList.add("is-risky");
+      ui.statusEl.textContent = `#${index + 1} errore`;
+      ui.statusEl.title = String(item.error ?? "errore batch");
+      continue;
+    }
+
+    const quality = getBatchQuality(item.result);
+    const overallText = Number.isFinite(quality.overall)
+      ? `${Math.round(quality.overall * 100)}%`
+      : "n/a";
+    const diffText = Number(quality.diffScore ?? 0).toFixed(1);
+    ui.row.classList.add(classifyBatchQuality(quality.overall));
+    ui.statusEl.textContent = `#${index + 1} q ${overallText} | diff ${diffText}`;
+    ui.statusEl.title =
+      `quality ${overallText} | diff ${diffText} | area ${Math.round(quality.diffArea * 100)}% | ` +
+      `grid ${Math.round(quality.grid * 100)}% | palette ${Math.round(quality.palette * 100)}%`;
+  }
 }
 
 async function processSingleFile(file, options = {}) {
@@ -2663,6 +2813,9 @@ els.processBtn.addEventListener("click", async () => {
     const items = selectedFiles.map((f) => ({
       file: f,
       ui: addBatchItem(f.webkitRelativePath || f.name),
+      result: null,
+      failed: false,
+      error: null,
     }));
     const includeBatchDebug = els.batchIncludeDebug.checked && getDownloadMode() === "zip";
     for (const it of items) {
@@ -2681,11 +2834,25 @@ els.processBtn.addEventListener("click", async () => {
           overlayBytes: result.overlayBytes ?? null,
           heatmapBytes: result.heatmapBytes ?? null,
         });
-        it.ui.statusEl.textContent = "ok";
+        it.result = batchResults[batchResults.length - 1];
+        const quality = getBatchQuality(it.result);
+        if (Number.isFinite(quality.overall)) {
+          it.ui.row.classList.add(classifyBatchQuality(quality.overall));
+          it.ui.statusEl.textContent = `q ${Math.round(quality.overall * 100)}% | diff ${quality.diffScore.toFixed(1)}`;
+        } else {
+          it.ui.statusEl.textContent = "ok";
+        }
       } catch (e) {
+        it.failed = true;
+        it.error = e;
+        it.ui.row.classList.add("is-risky");
         it.ui.statusEl.textContent = "errore";
+        it.ui.statusEl.title = String(e ?? "errore batch");
       }
     }
+
+    batchResults = sortBatchResultsForReview(batchResults);
+    renderBatchReviewList(items);
 
     lastDebug = null;
     clearDebugSummary();
@@ -2712,7 +2879,9 @@ els.processBtn.addEventListener("click", async () => {
       renderSwatches(palette);
     }
 
-    setStatus(`Batch completato (${batchResults.length}/${selectedFiles.length}).`);
+    setStatus(
+      `Batch completato (${batchResults.length}/${selectedFiles.length}). Lista ordinata per quality: prima i casi peggiori.`,
+    );
     updateCompare();
     applyZoom();
     renderInputGrid();
@@ -2758,6 +2927,16 @@ els.downloadAllBtn.addEventListener("click", async () => {
             entries.push({ name: toZipHeatmapName(r.path || r.name), bytes: r.heatmapBytes });
           }
         }
+      }
+      if (includeDebug && batchResults.some((r) => r.debug)) {
+        entries.push({
+          name: "nasty-retropixel.batch-summary.json",
+          bytes: enc.encode(JSON.stringify(buildBatchSummaryPayload(batchResults), null, 2)),
+        });
+        entries.push({
+          name: "nasty-retropixel.batch-summary.csv",
+          bytes: enc.encode(buildBatchSummaryCsv(batchResults)),
+        });
       }
       const zipBytes = buildZipStore(entries);
       const blob = new Blob([zipBytes], { type: "application/zip" });

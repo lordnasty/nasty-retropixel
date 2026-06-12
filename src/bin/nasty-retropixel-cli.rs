@@ -3,7 +3,31 @@ use nasty_retropixel::{
     recommend_variant_for_image_bytes, suggest_setup_for_image_bytes, BatchConfig, BatchEvent,
     DebugExportOptions,
 };
+use serde::Serialize;
 use std::path::{Path, PathBuf};
+
+#[derive(Debug, Serialize)]
+struct BatchSummaryRow {
+    rank: usize,
+    relative_path: String,
+    output_relative_path: String,
+    quality_overall: f64,
+    diff_score: f64,
+    diff_area: f64,
+    grid_regularity: f64,
+    palette_compactness: f64,
+    coverage_ratio: f64,
+    palette_count: usize,
+    output_width: u32,
+    output_height: u32,
+    step_x: f64,
+    step_y: f64,
+    prefilter_mode: String,
+    palette_source: String,
+    palette_cleanup_mode: String,
+    cleanup_mode: String,
+    repair_mode: String,
+}
 
 fn main() {
     if let Err(e) = run() {
@@ -462,7 +486,7 @@ fn run() -> nasty_retropixel::Result<()> {
             debug: debug.clone(),
         };
 
-        return process_batch_with_reporter(&batch, |event| match event {
+        let batch_result = process_batch_with_reporter(&batch, |event| match event {
             BatchEvent::BatchStarted { input_dir, total } => {
                 println!(
                     "Batch processing {} image{} from: {}",
@@ -517,6 +541,33 @@ fn run() -> nasty_retropixel::Result<()> {
                 );
             }
         });
+
+        if debug.write_json {
+            let debug_root = debug
+                .output_dir
+                .clone()
+                .unwrap_or_else(|| PathBuf::from(output));
+            match write_batch_summary_reports(&debug_root) {
+                Ok(Some((json_path, csv_path, count))) => {
+                    println!(
+                        "Batch quality summary: {} item{} -> {} | {}",
+                        count,
+                        if count == 1 { "" } else { "s" },
+                        json_path.display(),
+                        csv_path.display()
+                    );
+                }
+                Ok(None) => {}
+                Err(err) => {
+                    if batch_result.is_ok() {
+                        return Err(err);
+                    }
+                    eprintln!("Batch summary export failed: {}", err);
+                }
+            }
+        }
+
+        return batch_result;
     }
 
     let actual_output_path = if output.is_dir() {
@@ -551,4 +602,232 @@ fn run() -> nasty_retropixel::Result<()> {
         println!("Debug artifacts: {}", debug_root.display());
     }
     Ok(())
+}
+
+fn write_batch_summary_reports(
+    debug_root: &Path,
+) -> nasty_retropixel::Result<Option<(PathBuf, PathBuf, usize)>> {
+    let mut debug_files = Vec::new();
+    collect_debug_json_files(debug_root, &mut debug_files)?;
+    debug_files.sort();
+    if debug_files.is_empty() {
+        return Ok(None);
+    }
+
+    let mut rows = Vec::new();
+    for file in debug_files {
+        let raw = std::fs::read(&file).map_err(|e| {
+            nasty_retropixel::PixelSnapperError::ProcessingError(format!(
+                "Failed to read debug report '{}': {}",
+                file.display(),
+                e
+            ))
+        })?;
+        let value: serde_json::Value = serde_json::from_slice(&raw).map_err(|e| {
+            nasty_retropixel::PixelSnapperError::ProcessingError(format!(
+                "Failed to parse debug report '{}': {}",
+                file.display(),
+                e
+            ))
+        })?;
+
+        let rel_path = file
+            .strip_prefix(debug_root)
+            .unwrap_or(&file)
+            .to_string_lossy()
+            .replace('\\', "/");
+        let output_relative_path = rel_path
+            .strip_suffix(".debug.json")
+            .map(|s| format!("{}.png", s))
+            .unwrap_or_else(|| rel_path.clone());
+        rows.push(BatchSummaryRow {
+            rank: 0,
+            relative_path: rel_path,
+            output_relative_path,
+            quality_overall: json_f64(&value, &["quality", "overall_score"]),
+            diff_score: json_f64(&value, &["quality", "diff_score"]),
+            diff_area: json_f64(&value, &["quality", "diff_area"]),
+            grid_regularity: json_f64(&value, &["quality", "grid_regularity"]),
+            palette_compactness: json_f64(&value, &["quality", "palette_compactness"]),
+            coverage_ratio: json_f64(&value, &["quality", "coverage_ratio"]),
+            palette_count: json_u64(&value, &["palette"])
+                .or_else(|| json_u64(&value, &["palette_count"]))
+                .unwrap_or(0) as usize,
+            output_width: json_u64(&value, &["output_width"]).unwrap_or(0) as u32,
+            output_height: json_u64(&value, &["output_height"]).unwrap_or(0) as u32,
+            step_x: json_f64(&value, &["step_x"]),
+            step_y: json_f64(&value, &["step_y"]),
+            prefilter_mode: json_str(&value, &["config", "prefilter_mode"]),
+            palette_source: json_str(&value, &["config", "palette_source"]),
+            palette_cleanup_mode: json_str(&value, &["config", "palette_cleanup_mode"]),
+            cleanup_mode: json_str(&value, &["config", "cleanup_mode"]),
+            repair_mode: json_str(&value, &["config", "repair_mode"]),
+        });
+    }
+
+    rows.sort_by(|a, b| {
+        a.quality_overall
+            .total_cmp(&b.quality_overall)
+            .then_with(|| a.diff_score.total_cmp(&b.diff_score))
+            .then_with(|| a.relative_path.cmp(&b.relative_path))
+    });
+    for (idx, row) in rows.iter_mut().enumerate() {
+        row.rank = idx + 1;
+    }
+
+    let avg_quality = if rows.is_empty() {
+        0.0
+    } else {
+        rows.iter().map(|r| r.quality_overall).sum::<f64>() / rows.len() as f64
+    };
+    let avg_diff_score = if rows.is_empty() {
+        0.0
+    } else {
+        rows.iter().map(|r| r.diff_score).sum::<f64>() / rows.len() as f64
+    };
+    let avg_diff_area = if rows.is_empty() {
+        0.0
+    } else {
+        rows.iter().map(|r| r.diff_area).sum::<f64>() / rows.len() as f64
+    };
+
+    let json_path = debug_root.join("nasty-retropixel.batch-summary.json");
+    let csv_path = debug_root.join("nasty-retropixel.batch-summary.csv");
+    let json_payload = serde_json::json!({
+        "count": rows.len(),
+        "sorted_by": "quality_overall_asc",
+        "focus": "lowest_quality_first",
+        "averages": {
+            "quality_overall": avg_quality,
+            "diff_score": avg_diff_score,
+            "diff_area": avg_diff_area
+        },
+        "worst": rows.first(),
+        "best": rows.last(),
+        "rows": rows
+    });
+    std::fs::write(
+        &json_path,
+        serde_json::to_vec_pretty(&json_payload).map_err(|e| {
+            nasty_retropixel::PixelSnapperError::ProcessingError(format!(
+                "Failed to serialize batch summary '{}': {}",
+                json_path.display(),
+                e
+            ))
+        })?,
+    )
+    .map_err(|e| {
+        nasty_retropixel::PixelSnapperError::ProcessingError(format!(
+            "Failed to write batch summary '{}': {}",
+            json_path.display(),
+            e
+        ))
+    })?;
+
+    std::fs::write(&csv_path, build_batch_summary_csv(&rows)).map_err(|e| {
+        nasty_retropixel::PixelSnapperError::ProcessingError(format!(
+            "Failed to write batch summary CSV '{}': {}",
+            csv_path.display(),
+            e
+        ))
+    })?;
+
+    Ok(Some((json_path, csv_path, rows.len())))
+}
+
+fn collect_debug_json_files(root: &Path, out: &mut Vec<PathBuf>) -> nasty_retropixel::Result<()> {
+    let entries = std::fs::read_dir(root).map_err(|e| {
+        nasty_retropixel::PixelSnapperError::ProcessingError(format!(
+            "Failed to read debug directory '{}': {}",
+            root.display(),
+            e
+        ))
+    })?;
+
+    for entry in entries {
+        let entry = entry.map_err(|e| {
+            nasty_retropixel::PixelSnapperError::ProcessingError(format!(
+                "Failed to read entry in debug directory '{}': {}",
+                root.display(),
+                e
+            ))
+        })?;
+        let path = entry.path();
+        if path.is_dir() {
+            collect_debug_json_files(&path, out)?;
+            continue;
+        }
+        if path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(|n| n.ends_with(".debug.json"))
+            .unwrap_or(false)
+        {
+            out.push(path);
+        }
+    }
+    Ok(())
+}
+
+fn json_node<'a>(value: &'a serde_json::Value, path: &[&str]) -> Option<&'a serde_json::Value> {
+    let mut current = value;
+    for key in path {
+        current = current.get(*key)?;
+    }
+    Some(current)
+}
+
+fn json_f64(value: &serde_json::Value, path: &[&str]) -> f64 {
+    json_node(value, path).and_then(|v| v.as_f64()).unwrap_or(0.0)
+}
+
+fn json_u64(value: &serde_json::Value, path: &[&str]) -> Option<u64> {
+    let node = json_node(value, path)?;
+    node.as_u64().or_else(|| node.as_array().map(|a| a.len() as u64))
+}
+
+fn json_str(value: &serde_json::Value, path: &[&str]) -> String {
+    json_node(value, path)
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string()
+}
+
+fn csv_escape(value: &str) -> String {
+    if value.contains(',') || value.contains('"') || value.contains('\n') || value.contains('\r') {
+        format!("\"{}\"", value.replace('"', "\"\""))
+    } else {
+        value.to_string()
+    }
+}
+
+fn build_batch_summary_csv(rows: &[BatchSummaryRow]) -> String {
+    let mut csv = String::from(
+        "rank,relative_path,output_relative_path,quality_overall,diff_score,diff_area,grid_regularity,palette_compactness,coverage_ratio,palette_count,output_width,output_height,step_x,step_y,prefilter_mode,palette_source,palette_cleanup_mode,cleanup_mode,repair_mode\n",
+    );
+    for row in rows {
+        csv.push_str(&format!(
+            "{},{},{},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{},{},{},{:.4},{:.4},{},{},{},{},{}\n",
+            row.rank,
+            csv_escape(&row.relative_path),
+            csv_escape(&row.output_relative_path),
+            row.quality_overall,
+            row.diff_score,
+            row.diff_area,
+            row.grid_regularity,
+            row.palette_compactness,
+            row.coverage_ratio,
+            row.palette_count,
+            row.output_width,
+            row.output_height,
+            row.step_x,
+            row.step_y,
+            csv_escape(&row.prefilter_mode),
+            csv_escape(&row.palette_source),
+            csv_escape(&row.palette_cleanup_mode),
+            csv_escape(&row.cleanup_mode),
+            csv_escape(&row.repair_mode),
+        ));
+    }
+    csv
 }
