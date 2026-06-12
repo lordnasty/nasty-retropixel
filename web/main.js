@@ -54,6 +54,10 @@ const els = {
   debugGridSize: document.getElementById("debugGridSize"),
   debugPaletteCount: document.getElementById("debugPaletteCount"),
   debugModes: document.getElementById("debugModes"),
+  qualityCurrentSummary: document.getElementById("qualityCurrentSummary"),
+  qualityBatchSummary: document.getElementById("qualityBatchSummary"),
+  qualityHistoryList: document.getElementById("qualityHistoryList"),
+  clearQualityHistoryBtn: document.getElementById("clearQualityHistoryBtn"),
   inputPreview: document.getElementById("inputPreview"),
   outputPreview: document.getElementById("outputPreview"),
   compareFrame: document.getElementById("compareFrame"),
@@ -88,6 +92,8 @@ const els = {
   showPalette: document.getElementById("showPalette"),
   zipStatus: document.getElementById("zipStatus"),
   batchIncludeDebug: document.getElementById("batchIncludeDebug"),
+  batchReviewFilter: document.getElementById("batchReviewFilter"),
+  batchReviewSummary: document.getElementById("batchReviewSummary"),
   batchList: document.getElementById("batchList"),
   paletteSwatches: document.getElementById("paletteSwatches"),
   showGrid: document.getElementById("showGrid"),
@@ -140,6 +146,10 @@ const REQUIRED_KEYS = [
   "debugGridSize",
   "debugPaletteCount",
   "debugModes",
+  "qualityCurrentSummary",
+  "qualityBatchSummary",
+  "qualityHistoryList",
+  "clearQualityHistoryBtn",
   "inputPreview",
   "outputPreview",
   "compareInputWrap",
@@ -174,6 +184,8 @@ const REQUIRED_KEYS = [
   "showGrid",
   "zipStatus",
   "batchIncludeDebug",
+  "batchReviewFilter",
+  "batchReviewSummary",
   "batchList",
   "paletteSwatches",
   "inputGridOverlay",
@@ -205,8 +217,11 @@ let suggestedSetup = null;
 let activeSetupProfile = "balanced";
 let variantCompareResults = [];
 let recommendedVariantKey = null;
+let qualityHistory = [];
+let lastBatchReviewItems = [];
 
 const STORAGE_KEY = "nasty-retropixel-settings-v1";
+const HISTORY_STORAGE_KEY = "nasty-retropixel-quality-history-v1";
 const SETUP_PROFILES = {
   conservative: {
     label: "Conservativo",
@@ -302,6 +317,134 @@ function clearDebugSummary() {
   els.debugGridSize.textContent = "-";
   els.debugPaletteCount.textContent = "-";
   els.debugModes.textContent = "Nessun report disponibile.";
+}
+
+function readQualityHistory() {
+  try {
+    const raw = localStorage.getItem(HISTORY_STORAGE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeQualityHistory() {
+  try {
+    localStorage.setItem(HISTORY_STORAGE_KEY, JSON.stringify(qualityHistory.slice(0, 24)));
+  } catch {}
+}
+
+function formatQualityPct(value) {
+  return Number.isFinite(value) ? `${Math.round(value * 100)}%` : "n/a";
+}
+
+function historyLevelClass(overall) {
+  return classifyBatchQuality(overall);
+}
+
+function renderQualityDashboard() {
+  const currentQuality = lastDebug?.quality ?? null;
+  if (currentQuality && Number.isFinite(Number(currentQuality.overall_score))) {
+    const level = historyLevelClass(Number(currentQuality.overall_score));
+    els.qualityCurrentSummary.className = `forecastBox ${level === "is-good" ? "level-good" : level === "is-mid" ? "level-mixed" : "level-risky"}`;
+    els.qualityCurrentSummary.innerHTML =
+      `<strong>Output corrente</strong>: quality ${formatQualityPct(Number(currentQuality.overall_score))}, ` +
+      `grid ${formatQualityPct(Number(currentQuality.grid_regularity ?? 0))}, ` +
+      `palette ${formatQualityPct(Number(currentQuality.palette_compactness ?? 0))}, ` +
+      `diff ${Number(currentQuality.diff_score ?? 0).toFixed(1)} / ${Math.round(Number(currentQuality.diff_area ?? 0) * 100)}%.`;
+    els.qualityCurrentSummary.classList.remove("hidden");
+  } else {
+    els.qualityCurrentSummary.className = "forecastBox hidden";
+    els.qualityCurrentSummary.textContent = "";
+  }
+
+  const latestBatch = qualityHistory.find((entry) => entry.type === "batch") ?? null;
+  if (latestBatch) {
+    const level = historyLevelClass(Number(latestBatch.avg_quality ?? 0));
+    els.qualityBatchSummary.className = `forecastBox ${level === "is-good" ? "level-good" : level === "is-mid" ? "level-mixed" : "level-risky"}`;
+    els.qualityBatchSummary.innerHTML =
+      `<strong>Ultimo batch</strong>: ${latestBatch.ok_count ?? 0}/${latestBatch.total_count ?? 0} ok, ` +
+      `avg ${formatQualityPct(Number(latestBatch.avg_quality ?? 0))}, ` +
+      `worst ${String(latestBatch.worst_path ?? "-")} (${formatQualityPct(Number(latestBatch.worst_quality ?? 0))}).`;
+    els.qualityBatchSummary.classList.remove("hidden");
+  } else {
+    els.qualityBatchSummary.className = "forecastBox hidden";
+    els.qualityBatchSummary.textContent = "";
+  }
+
+  els.qualityHistoryList.textContent = "";
+  if (!Array.isArray(qualityHistory) || qualityHistory.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "hint";
+    empty.textContent = "Nessuna review salvata.";
+    els.qualityHistoryList.appendChild(empty);
+    return;
+  }
+
+  for (const entry of qualityHistory.slice(0, 8)) {
+    const row = document.createElement("div");
+    row.className = `historyItem ${historyLevelClass(Number(entry.quality_overall ?? entry.avg_quality ?? NaN))}`;
+    const title = document.createElement("div");
+    title.className = "historyTitle";
+    const when = new Date(Number(entry.timestamp ?? Date.now()));
+    const whenText = Number.isFinite(when.getTime()) ? when.toLocaleString() : "adesso";
+    if (entry.type === "batch") {
+      title.textContent = `Batch ${entry.ok_count ?? 0}/${entry.total_count ?? 0} | avg ${formatQualityPct(Number(entry.avg_quality ?? 0))}`;
+    } else {
+      title.textContent = `${String(entry.label ?? "Output")} | ${formatQualityPct(Number(entry.quality_overall ?? 0))}`;
+    }
+    const meta = document.createElement("div");
+    meta.className = "historyMeta";
+    meta.textContent =
+      entry.type === "batch"
+        ? `${whenText} | worst ${String(entry.worst_path ?? "-")} | diff ${Number(entry.avg_diff_score ?? 0).toFixed(1)}`
+        : `${whenText} | diff ${Number(entry.diff_score ?? 0).toFixed(1)} | area ${Math.round(Number(entry.diff_area ?? 0) * 100)}% | ${String(entry.label ?? "")}`;
+    row.appendChild(title);
+    row.appendChild(meta);
+    els.qualityHistoryList.appendChild(row);
+  }
+}
+
+function pushQualityHistory(entry) {
+  qualityHistory = [entry, ...qualityHistory.filter((item) => item.id !== entry.id)].slice(0, 24);
+  writeQualityHistory();
+  renderQualityDashboard();
+}
+
+function saveSingleQualityHistory(label, debug) {
+  if (!debug?.quality) return;
+  pushQualityHistory({
+    id: `single:${label}:${Date.now()}`,
+    type: "single",
+    timestamp: Date.now(),
+    label: String(label || "output"),
+    quality_overall: Number(debug.quality.overall_score ?? 0),
+    diff_score: Number(debug.quality.diff_score ?? 0),
+    diff_area: Number(debug.quality.diff_area ?? 0),
+    grid_regularity: Number(debug.quality.grid_regularity ?? 0),
+    palette_compactness: Number(debug.quality.palette_compactness ?? 0),
+  });
+}
+
+function saveBatchQualityHistory(results, totalCount) {
+  const rows = buildBatchSummaryRows(results).filter((row) => typeof row.quality_overall === "number");
+  if (rows.length === 0) return;
+  const avgQuality = rows.reduce((sum, row) => sum + Number(row.quality_overall ?? 0), 0) / rows.length;
+  const avgDiffScore = rows.reduce((sum, row) => sum + Number(row.diff_score ?? 0), 0) / rows.length;
+  const worst = rows[0] ?? null;
+  pushQualityHistory({
+    id: `batch:${Date.now()}`,
+    type: "batch",
+    timestamp: Date.now(),
+    total_count: Number(totalCount ?? rows.length),
+    ok_count: rows.length,
+    avg_quality: avgQuality,
+    avg_diff_score: avgDiffScore,
+    worst_path: worst?.relative_path ?? "",
+    worst_quality: Number(worst?.quality_overall ?? 0),
+  });
 }
 
 function clearPresetSuggestion() {
@@ -849,6 +992,7 @@ function writeSettings() {
       showGrid: els.showGrid.checked,
       downloadMode: getDownloadMode(),
       batchIncludeDebug: els.batchIncludeDebug.checked,
+      batchReviewFilter: els.batchReviewFilter.value,
     };
     localStorage.setItem(STORAGE_KEY, JSON.stringify(settings));
   } catch {}
@@ -882,6 +1026,8 @@ function applySettings(settings) {
   if (settings.showGrid != null) els.showGrid.checked = Boolean(settings.showGrid);
   if (settings.batchIncludeDebug != null)
     els.batchIncludeDebug.checked = Boolean(settings.batchIncludeDebug);
+  if (settings.batchReviewFilter != null)
+    els.batchReviewFilter.value = String(settings.batchReviewFilter);
   if (settings.downloadMode === "zip") {
     const zipRadio = document.querySelector('input[name="downloadMode"][value="zip"]');
     if (zipRadio) zipRadio.checked = true;
@@ -1035,6 +1181,8 @@ function updateUiFromSettings() {
   els.batchIncludeDebug.parentElement.classList.toggle("hidden", !els.batchMode.checked);
   els.batchIncludeDebug.disabled = !els.batchMode.checked || getDownloadMode() !== "zip";
   els.folderMode.parentElement.classList.toggle("hidden", !els.batchMode.checked);
+  els.batchReviewFilter.parentElement.classList.toggle("hidden", !els.batchMode.checked);
+  els.batchReviewSummary.classList.toggle("hidden", !els.batchMode.checked);
   els.zipStatus.textContent = els.batchMode.checked
     ? "ZIP: interno (offline). Consigliato per batch."
     : "ZIP: interno (offline).";
@@ -1645,6 +1793,7 @@ function addBatchItem(name) {
 }
 
 function renderBatchReviewList(items) {
+  lastBatchReviewItems = Array.isArray(items) ? [...items] : [];
   clearBatchList();
   const ordered = [...items].sort((a, b) => {
     if (a.failed && !b.failed) return -1;
@@ -1656,8 +1805,29 @@ function renderBatchReviewList(items) {
       String(b.file?.webkitRelativePath || b.file?.name || ""),
     );
   });
+  const filter = String(els.batchReviewFilter.value || "all");
+  const filtered = ordered.filter((item, index) => {
+    if (filter === "all") return true;
+    if (filter === "failed") return Boolean(item.failed);
+    if (item.failed) return false;
+    const quality = getBatchQuality(item.result);
+    if (filter === "worst") return index < 5 || (Number.isFinite(quality.overall) && quality.overall < 0.46);
+    if (filter === "risky") return classifyBatchQuality(quality.overall) === "is-risky";
+    if (filter === "mid") return classifyBatchQuality(quality.overall) === "is-mid";
+    if (filter === "good") return classifyBatchQuality(quality.overall) === "is-good";
+    return true;
+  });
+  const total = ordered.length;
+  const failedCount = ordered.filter((item) => item.failed).length;
+  const riskyCount = ordered.filter(
+    (item) => !item.failed && classifyBatchQuality(getBatchQuality(item.result).overall) === "is-risky",
+  ).length;
+  els.batchReviewSummary.textContent =
+    total === 0
+      ? "Nessun batch elaborato."
+      : `Filtro ${filter} | elementi ${filtered.length}/${total} | risky ${riskyCount} | errori ${failedCount}`;
 
-  for (const [index, item] of ordered.entries()) {
+  for (const [index, item] of filtered.entries()) {
     const path = item.file?.webkitRelativePath || item.file?.name || "file";
     const ui = addBatchItem(path);
     if (item.failed) {
@@ -2371,6 +2541,8 @@ async function boot() {
     setStatus("Inizializzazione WASM...");
     await init();
     wasmReady = true;
+    qualityHistory = readQualityHistory();
+    renderQualityDashboard();
     updatePresetStatus();
     setStatus("Pronto. Seleziona un'immagine.");
     setProcessEnabled(selectedFiles.length > 0);
@@ -2388,6 +2560,7 @@ els.pixelOverrideEnabled.addEventListener("change", () => {
 function setSelectedFiles(files) {
   selectedFiles = Array.isArray(files) ? files : [];
   revokeBatchUrls();
+  lastBatchReviewItems = [];
 
   revokeUrl(inputUrl);
   revokeUrl(outputUrl);
@@ -2409,10 +2582,12 @@ function setSelectedFiles(files) {
   els.compareOutput.removeAttribute("src");
   els.compareInput.removeAttribute("src");
   clearBatchList();
+  els.batchReviewSummary.textContent = "Nessun batch elaborato.";
   els.paletteSwatches.textContent = "";
   lastDebug = null;
   clearGridOverlay();
   clearDebugSummary();
+  renderQualityDashboard();
   clearPresetSuggestion();
   clearVariantCompare();
 
@@ -2729,6 +2904,17 @@ els.pixelSize.addEventListener("change", () => {
   writeSettings();
 });
 
+els.batchReviewFilter.addEventListener("change", () => {
+  renderBatchReviewList(lastBatchReviewItems);
+  writeSettings();
+});
+
+els.clearQualityHistoryBtn.addEventListener("click", () => {
+  qualityHistory = [];
+  writeQualityHistory();
+  renderQualityDashboard();
+});
+
 els.processBtn.addEventListener("click", async () => {
   if (!wasmReady) {
     setStatus("WASM non pronto.", true);
@@ -2807,6 +2993,9 @@ els.processBtn.addEventListener("click", async () => {
           : await computePaletteFromPng(processedBytes, 64);
       renderSwatches(palette);
       renderInputGrid();
+      if (lastDebug) {
+        saveSingleQualityHistory(file.name, lastDebug);
+      }
       return;
     }
 
@@ -2853,6 +3042,7 @@ els.processBtn.addEventListener("click", async () => {
 
     batchResults = sortBatchResultsForReview(batchResults);
     renderBatchReviewList(items);
+    saveBatchQualityHistory(batchResults, selectedFiles.length);
 
     lastDebug = null;
     clearDebugSummary();
@@ -2882,6 +3072,7 @@ els.processBtn.addEventListener("click", async () => {
     setStatus(
       `Batch completato (${batchResults.length}/${selectedFiles.length}). Lista ordinata per quality: prima i casi peggiori.`,
     );
+    renderQualityDashboard();
     updateCompare();
     applyZoom();
     renderInputGrid();

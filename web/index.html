@@ -100,6 +100,19 @@
         </section>
 
         <section class="debugCard">
+          <div class="debugCardTitle">Quality Dashboard</div>
+          <div id="qualityCurrentSummary" class="forecastBox hidden"></div>
+          <div id="qualityBatchSummary" class="forecastBox hidden"></div>
+          <div class="compareHeader">
+            <div class="hint">Storico locale delle ultime review qualitative.</div>
+            <button id="clearQualityHistoryBtn" class="secondary small">Pulisci Storico</button>
+          </div>
+          <div id="qualityHistoryList" class="historyList">
+            <div class="hint">Nessuna review salvata.</div>
+          </div>
+        </section>
+
+        <section class="debugCard">
           <div class="debugCardTitle">Suggerimento Preset</div>
           <div id="presetSuggestion" class="hint">Seleziona un'immagine per ottenere un preset consigliato.</div>
           <div id="presetDifficulty" class="difficultyBadge hidden"></div>
@@ -478,6 +491,18 @@
 
         <div class="drawerSection">
           <div class="drawerSectionTitle">Batch</div>
+          <div class="field compact">
+            <label for="batchReviewFilter">Filtro review</label>
+            <select id="batchReviewFilter">
+              <option value="all" selected>Tutti</option>
+              <option value="worst">Solo peggiori</option>
+              <option value="risky">Solo risky</option>
+              <option value="mid">Solo medi</option>
+              <option value="good">Solo buoni</option>
+              <option value="failed">Solo errori</option>
+            </select>
+          </div>
+          <div id="batchReviewSummary" class="hint">Nessun batch elaborato.</div>
           <div id="batchList" class="batchList"></div>
         </div>
 

@@ -69,6 +69,7 @@ La GUI copre oggi tutte le funzioni operative principali sviluppate nel core:
 - confronto interattivo con slider e blink;
 - confronto varianti con ranking automatico per qualita';
 - batch review con ordinamento automatico dei casi peggiori;
+- dashboard qualita' persistente con storico locale delle ultime review;
 - download PNG e ZIP offline.
 
 Nota attuale:
@@ -81,6 +82,8 @@ Nota attuale:
 - la CLI, quando esporta `debug.json` in batch, genera anche un riepilogo ordinato per qualita' (`batch-summary.json/csv`) nella root debug;
 - la GUI batch preserva i path interni quando selezioni una cartella e scarichi lo ZIP.
 - il confronto varianti della GUI usa la heatmap del core quando disponibile e ordina i risultati mettendo in evidenza la variante consigliata.
+- la GUI salva in locale uno storico sintetico di output singoli e batch recenti, utile per riprendere il lavoro dopo il riavvio;
+- il drawer batch ha un filtro review (`tutti`, `peggiori`, `risky`, `medi`, `buoni`, `errori`) per isolare subito i casi che meritano revisione.
 
 ## Funzioni Core
 
