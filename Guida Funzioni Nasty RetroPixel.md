@@ -67,6 +67,7 @@ La GUI copre oggi tutte le funzioni operative principali sviluppate nel core:
 - trim trasparenza;
 - scala finale;
 - confronto interattivo con slider e blink;
+- confronto varianti con ranking automatico per qualita';
 - download PNG e ZIP offline.
 
 Nota attuale:
@@ -76,6 +77,7 @@ Nota attuale:
 - la GUI esporta debug singolo via download e, in batch ZIP, include anche JSON + overlay + heatmap;
 - il batch del core e della CLI e' ricorsivo e preserva la struttura delle sottocartelle in output/debug;
 - la GUI batch preserva i path interni quando selezioni una cartella e scarichi lo ZIP.
+- il confronto varianti della GUI usa la heatmap del core quando disponibile e ordina i risultati mettendo in evidenza la variante consigliata.
 
 ## Funzioni Core
 

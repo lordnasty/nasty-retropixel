@@ -1716,6 +1716,18 @@ function buildVariantPlans() {
   ];
 }
 
+function getVariantQuality(result) {
+  const quality = result?.debug?.quality ?? {};
+  return {
+    overall: Number(quality.overall_score ?? 0),
+    grid: Number(quality.grid_regularity ?? 0),
+    palette: Number(quality.palette_compactness ?? 0),
+    coverage: Number(quality.coverage_ratio ?? 0),
+    diffScore: Number(quality.diff_score ?? result?.diffScoreValue ?? 0),
+    diffArea: Number(quality.diff_area ?? result?.diffAreaValue ?? 0),
+  };
+}
+
 async function promoteVariantResult(result) {
   if (!result) return;
   revokeUrl(outputUrl);
@@ -1826,13 +1838,30 @@ function renderVariantCompareResults(results) {
   }
 
   recommendedVariantKey = recommendation ? String(recommendation.key ?? "") : null;
+  if (!recommendedVariantKey) {
+    recommendedVariantKey = [...scoreMap.entries()]
+      .sort((a, b) => Number(b[1]?.overallValue ?? 0) - Number(a[1]?.overallValue ?? 0))[0]?.[0] ?? null;
+  }
+  const rankedResults = [...results].sort((a, b) => {
+    const aKey = String(a.plan.key);
+    const bKey = String(b.plan.key);
+    if (recommendedVariantKey && aKey === recommendedVariantKey && bKey !== recommendedVariantKey) return -1;
+    if (recommendedVariantKey && bKey === recommendedVariantKey && aKey !== recommendedVariantKey) return 1;
+    const aScore = Number(scoreMap.get(aKey)?.overallValue ?? 0);
+    const bScore = Number(scoreMap.get(bKey)?.overallValue ?? 0);
+    if (bScore !== aScore) return bScore - aScore;
+    return Number(a.diffScoreValue ?? 0) - Number(b.diffScoreValue ?? 0);
+  });
+  const recommendedResult = rankedResults.find((entry) => entry.plan.key === recommendedVariantKey) ?? rankedResults[0];
   if (recommendedVariantKey) {
+    const quality = getVariantQuality(recommendedResult);
     els.variantRecommendationLabel.textContent = `Scelta consigliata: ${String(
-      recommendation.label ?? recommendedVariantKey,
+      recommendation?.label ?? recommendedResult?.plan?.label ?? recommendedVariantKey,
     )}`;
-    els.variantRecommendationReason.textContent = String(
-      recommendation.reason ?? "offre il compromesso migliore tra fedelta' e pulizia",
+    const reason = String(
+      recommendation?.reason ?? "offre il compromesso migliore tra fedelta' e pulizia",
     );
+    els.variantRecommendationReason.textContent = `${reason} | quality ${Math.round(quality.overall * 100)}% | grid ${Math.round(quality.grid * 100)}% | palette ${Math.round(quality.palette * 100)}%`;
     els.variantRecommendation.classList.remove("hidden");
     els.applyRecommendedVariantBtn.disabled = false;
   } else {
@@ -1840,14 +1869,30 @@ function renderVariantCompareResults(results) {
     els.applyRecommendedVariantBtn.disabled = true;
   }
 
-  for (const result of results) {
+  for (const [idx, result] of rankedResults.entries()) {
     const score = scoreMap.get(result.plan.key);
+    const quality = getVariantQuality(result);
+    const isRecommended = result.plan.key === recommendedVariantKey;
     const card = document.createElement("div");
     card.className = "variantCard";
+    if (isRecommended) card.classList.add("is-recommended");
 
     const img = document.createElement("img");
     img.src = result.url;
     img.alt = `Variante ${result.plan.label}`;
+
+    const badgeRow = document.createElement("div");
+    badgeRow.className = "variantBadgeRow";
+    const rankBadge = document.createElement("div");
+    rankBadge.className = "variantBadge rank";
+    rankBadge.textContent = `#${idx + 1}`;
+    badgeRow.appendChild(rankBadge);
+    if (isRecommended) {
+      const recommendedBadge = document.createElement("div");
+      recommendedBadge.className = "variantBadge recommended";
+      recommendedBadge.textContent = "Consigliata";
+      badgeRow.appendChild(recommendedBadge);
+    }
 
     const title = document.createElement("div");
     title.className = "variantCardTitle";
@@ -1858,7 +1903,7 @@ function renderVariantCompareResults(results) {
     meta.textContent =
       `${result.plan.summary} Repair ${result.debug?.config?.repair_mode ?? "smart"}, ` +
       `palette-fix ${result.debug?.config?.palette_cleanup_mode ?? "basic"}, ` +
-      `trim ${result.plan.trimTransparent ? "on" : "off"}, diff ${result.diffScore}.`;
+      `trim ${result.plan.trimTransparent ? "on" : "off"}, quality ${Math.round(quality.overall * 100)}%, diff ${quality.diffScore.toFixed(1)}.`;
 
     const scoreRow = document.createElement("div");
     scoreRow.className = "variantScoreRow";
@@ -1869,6 +1914,7 @@ function renderVariantCompareResults(results) {
         el.textContent = text;
         return el;
       };
+      scoreRow.appendChild(makePill(score.overallText, score.overallClass));
       scoreRow.appendChild(makePill(score.fidelityText, score.fidelityClass));
       scoreRow.appendChild(makePill(score.cleanText, score.cleanClass));
       scoreRow.appendChild(makePill(score.aggressiveText, score.aggressiveClass));
@@ -1885,6 +1931,7 @@ function renderVariantCompareResults(results) {
       }
     });
 
+    card.appendChild(badgeRow);
     card.appendChild(title);
     card.appendChild(img);
     card.appendChild(scoreRow);
@@ -1894,10 +1941,24 @@ function renderVariantCompareResults(results) {
 
     const largeCard = document.createElement("div");
     largeCard.className = "variantPreviewCard";
+    if (isRecommended) largeCard.classList.add("is-recommended");
 
     const largeTitle = document.createElement("div");
     largeTitle.className = "variantCardTitle";
     largeTitle.textContent = result.plan.label;
+
+    const largeBadgeRow = document.createElement("div");
+    largeBadgeRow.className = "variantBadgeRow";
+    const largeRankBadge = document.createElement("div");
+    largeRankBadge.className = "variantBadge rank";
+    largeRankBadge.textContent = `#${idx + 1}`;
+    largeBadgeRow.appendChild(largeRankBadge);
+    if (isRecommended) {
+      const largeRecommendedBadge = document.createElement("div");
+      largeRecommendedBadge.className = "variantBadge recommended";
+      largeRecommendedBadge.textContent = "Consigliata";
+      largeBadgeRow.appendChild(largeRecommendedBadge);
+    }
 
     const largeImageFrame = document.createElement("div");
     largeImageFrame.className = "variantPreviewImage";
@@ -1914,7 +1975,7 @@ function renderVariantCompareResults(results) {
       `${result.plan.summary} Repair ${result.debug?.config?.repair_mode ?? "smart"}, ` +
       `palette-fix ${result.debug?.config?.palette_cleanup_mode ?? "basic"}, ` +
       `palette ${result.debug?.config?.palette_source ?? "cells"}, ` +
-      `trim ${result.plan.trimTransparent ? "on" : "off"}, diff ${result.diffScore}, area ${result.diffArea}.`;
+      `trim ${result.plan.trimTransparent ? "on" : "off"}, quality ${Math.round(quality.overall * 100)}%, grid ${Math.round(quality.grid * 100)}%, diff ${quality.diffScore.toFixed(1)}, area ${Math.round(quality.diffArea * 100)}%.`;
 
     const largeScoreRow = document.createElement("div");
     largeScoreRow.className = "variantScoreRow";
@@ -1925,6 +1986,7 @@ function renderVariantCompareResults(results) {
         el.textContent = text;
         return el;
       };
+      largeScoreRow.appendChild(makeLargePill(score.overallText, score.overallClass));
       largeScoreRow.appendChild(makeLargePill(score.fidelityText, score.fidelityClass));
       largeScoreRow.appendChild(makeLargePill(score.cleanText, score.cleanClass));
       largeScoreRow.appendChild(makeLargePill(score.aggressiveText, score.aggressiveClass));
@@ -1941,6 +2003,7 @@ function renderVariantCompareResults(results) {
       }
     });
 
+    largeCard.appendChild(largeBadgeRow);
     largeCard.appendChild(largeTitle);
     largeCard.appendChild(largeImageFrame);
     largeCard.appendChild(largeScoreRow);
@@ -1953,8 +2016,8 @@ function renderVariantCompareResults(results) {
   els.variantPreviewPanel.classList.remove("hidden");
   els.variantPreviewStatus.textContent =
     results.length >= 3
-      ? "Confronto 3-up pronto: puoi passare da output a diff visivo."
-      : "Confronto varianti pronto.";
+      ? "Confronto 3-up pronto: risultati ordinati automaticamente per qualita'."
+      : "Confronto varianti pronto e ordinato per qualita'.";
   updateVariantPreviewMode();
 }
 
@@ -1990,6 +2053,8 @@ function buildVariantScoreMap(results) {
   const maxPalette = Math.max(
     ...safeResults.map((r) => Number(r.debug?.palette_count ?? r.debug?.palette?.length ?? 0)),
   );
+  const minQuality = Math.min(...safeResults.map((r) => Number(r.debug?.quality?.overall_score ?? 0)));
+  const maxQuality = Math.max(...safeResults.map((r) => Number(r.debug?.quality?.overall_score ?? 0)));
 
   const normalize = (value, min, max) => {
     if (!Number.isFinite(value) || !Number.isFinite(min) || !Number.isFinite(max) || max <= min) {
@@ -2026,6 +2091,8 @@ function buildVariantScoreMap(results) {
     const fidelityValue = 1 - (diffNorm * 0.65 + areaNorm * 0.35);
     const cleanValue = (1 - paletteNorm) * 0.55 + (1 - diffNorm) * 0.2 + (1 - areaNorm) * 0.25;
     const aggressiveValue = Number(result.aggressivenessValue ?? 0);
+    const qualityValue = normalize(Number(result.debug?.quality?.overall_score ?? 0), minQuality, maxQuality);
+    const overallValue = qualityValue * 0.65 + fidelityValue * 0.2 + cleanValue * 0.1 + (1 - aggressiveValue) * 0.05;
 
     const toBand = (value, inverse = false) => {
       const v = inverse ? 1 - value : value;
@@ -2035,12 +2102,16 @@ function buildVariantScoreMap(results) {
     };
 
     scoreMap.set(result.plan.key, {
+      qualityValue,
+      overallValue,
       fidelityValue,
       cleanValue,
       aggressiveValue,
       fidelityWinner: fidelityWinner?.plan?.key === result.plan.key,
       cleanWinner: cleanWinner?.plan?.key === result.plan.key,
       aggressiveWinner: aggressiveWinner?.plan?.key === result.plan.key,
+      overallText: `Qualita': ${Math.round(overallValue * 100)}%`,
+      overallClass: toBand(overallValue),
       fidelityText:
         fidelityWinner?.plan?.key === result.plan.key ? "Piu' fedele" : `Fedelta': ${Math.round(fidelityValue * 100)}%`,
       fidelityClass: fidelityWinner?.plan?.key === result.plan.key ? "score-good" : toBand(fidelityValue),
@@ -2088,11 +2159,18 @@ async function runVariantComparison() {
       algoOverrides: plan.algoOverrides,
       trimTransparentOverride: plan.trimTransparent,
     });
-    const diff = await buildVariantDiffPng(
-      ctx.inputBytes,
-      selectedFiles[0]?.type || "image/png",
-      result.bytes,
-    );
+    const diff =
+      result.heatmapBytes && result.heatmapBytes.length > 0
+        ? {
+            bytes: result.heatmapBytes,
+            score: Number(result.debug?.quality?.diff_score ?? 0),
+            activeRatio: Number(result.debug?.quality?.diff_area ?? 0),
+          }
+        : await buildVariantDiffPng(
+            ctx.inputBytes,
+            selectedFiles[0]?.type || "image/png",
+            result.bytes,
+          );
     const blob = new Blob([result.bytes], { type: "image/png" });
     const url = URL.createObjectURL(blob);
     const diffBlob = new Blob([diff.bytes], { type: "image/png" });

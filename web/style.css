@@ -698,6 +698,12 @@ input[type="number"]:disabled {
   background: rgba(255, 255, 255, 0.03);
 }
 
+.variantCard.is-recommended,
+.variantPreviewCard.is-recommended {
+  border-color: rgba(72, 201, 120, 0.34);
+  box-shadow: 0 0 0 1px rgba(72, 201, 120, 0.12);
+}
+
 .variantCard img {
   width: 100%;
   aspect-ratio: 1;
@@ -716,6 +722,34 @@ input[type="number"]:disabled {
   color: var(--muted);
   font-size: 12px;
   line-height: 1.45;
+}
+
+.variantBadgeRow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.variantBadge {
+  padding: 5px 9px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 800;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text);
+}
+
+.variantBadge.rank {
+  color: #d8e7ff;
+  background: rgba(70, 112, 255, 0.14);
+  border-color: rgba(70, 112, 255, 0.24);
+}
+
+.variantBadge.recommended {
+  color: #cbffd7;
+  background: rgba(72, 201, 120, 0.14);
+  border-color: rgba(72, 201, 120, 0.28);
 }
 
 .variantScoreRow {
