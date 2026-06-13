@@ -71,6 +71,7 @@ La GUI copre oggi tutte le funzioni operative principali sviluppate nel core:
 - batch review con ordinamento automatico dei casi peggiori;
 - dashboard qualita' persistente con storico locale delle ultime review;
 - review pack intelligente con i peggiori risultati batch;
+- raccomandazioni adattive per ogni caso batch critico;
 - download PNG e ZIP offline.
 
 Nota attuale:
@@ -80,6 +81,7 @@ Nota attuale:
 - la GUI esporta debug singolo via download e, in batch ZIP, include anche JSON + overlay + heatmap;
 - la GUI batch puo' includere anche `nasty-retropixel.batch-summary.json` e `nasty-retropixel.batch-summary.csv` nello ZIP debug;
 - la GUI batch puo' generare anche `nasty-retropixel.review-pack/` con i peggiori `N` risultati, output finali e artefatti debug gia' pronti alla review;
+- summary batch e review pack includono anche priorita', preset consigliato e azioni suggerite per il retry successivo;
 - il batch del core e della CLI e' ricorsivo e preserva la struttura delle sottocartelle in output/debug;
 - la CLI, quando esporta `debug.json` in batch, genera anche un riepilogo ordinato per qualita' (`batch-summary.json/csv`) nella root debug;
 - la CLI supporta `--review-pack-top <n>` e crea una cartella `nasty-retropixel.review-pack/` con top worst output, debug json, overlay, heatmap e manifest;

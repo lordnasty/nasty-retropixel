@@ -11,6 +11,10 @@ struct BatchSummaryRow {
     rank: usize,
     relative_path: String,
     output_relative_path: String,
+    review_priority: String,
+    recommended_profile: String,
+    recommended_actions: String,
+    recommendation_reason: String,
     quality_overall: f64,
     diff_score: f64,
     diff_area: f64,
@@ -34,6 +38,75 @@ struct BatchSummaryArtifacts {
     json_path: PathBuf,
     csv_path: PathBuf,
     rows: Vec<BatchSummaryRow>,
+}
+
+fn summarize_recommendation(row: &BatchSummaryRow) -> (String, String, String, String) {
+    let priority = if row.quality_overall < 0.38 || row.diff_area > 0.32 {
+        "critical"
+    } else if row.quality_overall < 0.55 {
+        "high"
+    } else if row.quality_overall < 0.72 {
+        "medium"
+    } else {
+        "low"
+    }
+    .to_string();
+
+    let weakest = if row.grid_regularity < 0.48 {
+        "griglia instabile"
+    } else if row.palette_compactness < 0.60 {
+        "palette dispersa"
+    } else if row.diff_area > 0.22 {
+        "molta area differente"
+    } else if row.diff_score > 24.0 {
+        "fedelta' bassa"
+    } else {
+        "rifinitura generale"
+    };
+
+    let recommended_profile = if row.grid_regularity < 0.42 {
+        "tileset-cleanup"
+    } else if row.diff_area > 0.26 || row.coverage_ratio < 0.45 {
+        "character-cleanup"
+    } else if row.palette_compactness < 0.55 || row.palette_count > 24 {
+        "strict-retro"
+    } else if row.diff_score > 24.0 {
+        "ultra-cleanup"
+    } else {
+        "ai-sprite"
+    }
+    .to_string();
+
+    let mut actions = Vec::new();
+    if row.prefilter_mode == "off" && (row.diff_score > 22.0 || row.grid_regularity < 0.55) {
+        actions.push("attiva denoise box3".to_string());
+    }
+    if row.palette_source != "cells" && (row.grid_regularity < 0.58 || row.palette_compactness < 0.68) {
+        actions.push("usa palette dalle celle".to_string());
+    }
+    if row.palette_cleanup_mode != "strict" && (row.palette_compactness < 0.62 || row.palette_count > 24) {
+        actions.push("porta palette cleanup a strict".to_string());
+    }
+    if row.cleanup_mode == "off" && row.diff_area > 0.14 {
+        actions.push("attiva cleanup base".to_string());
+    }
+    if row.repair_mode == "off" {
+        actions.push("attiva repair smart".to_string());
+    } else if row.repair_mode == "basic" && row.diff_area > 0.18 {
+        actions.push("alza repair a smart".to_string());
+    } else if row.repair_mode != "ultra" && (row.diff_area > 0.26 || row.quality_overall < 0.38) {
+        actions.push("prova repair ultra".to_string());
+    }
+    if actions.is_empty() {
+        actions.push("mantieni setup attuale e verifica manualmente".to_string());
+    }
+
+    (
+        priority,
+        recommended_profile,
+        actions.join(" | "),
+        format!("focus principale: {}", weakest),
+    )
 }
 
 fn main() {
@@ -692,10 +765,14 @@ fn write_batch_summary_reports(
             .strip_suffix(".debug.json")
             .map(|s| format!("{}.png", s))
             .unwrap_or_else(|| rel_path.clone());
-        rows.push(BatchSummaryRow {
+        let mut row = BatchSummaryRow {
             rank: 0,
             relative_path: rel_path,
             output_relative_path,
+            review_priority: String::new(),
+            recommended_profile: String::new(),
+            recommended_actions: String::new(),
+            recommendation_reason: String::new(),
             quality_overall: json_f64(&value, &["quality", "overall_score"]),
             diff_score: json_f64(&value, &["quality", "diff_score"]),
             diff_area: json_f64(&value, &["quality", "diff_area"]),
@@ -714,7 +791,13 @@ fn write_batch_summary_reports(
             palette_cleanup_mode: json_str(&value, &["config", "palette_cleanup_mode"]),
             cleanup_mode: json_str(&value, &["config", "cleanup_mode"]),
             repair_mode: json_str(&value, &["config", "repair_mode"]),
-        });
+        };
+        let (priority, profile, actions, reason) = summarize_recommendation(&row);
+        row.review_priority = priority;
+        row.recommended_profile = profile;
+        row.recommended_actions = actions;
+        row.recommendation_reason = reason;
+        rows.push(row);
     }
 
     rows.sort_by(|a, b| {
@@ -962,14 +1045,18 @@ fn csv_escape(value: &str) -> String {
 
 fn build_batch_summary_csv(rows: &[BatchSummaryRow]) -> String {
     let mut csv = String::from(
-        "rank,relative_path,output_relative_path,quality_overall,diff_score,diff_area,grid_regularity,palette_compactness,coverage_ratio,palette_count,output_width,output_height,step_x,step_y,prefilter_mode,palette_source,palette_cleanup_mode,cleanup_mode,repair_mode\n",
+        "rank,relative_path,output_relative_path,review_priority,recommended_profile,recommended_actions,recommendation_reason,quality_overall,diff_score,diff_area,grid_regularity,palette_compactness,coverage_ratio,palette_count,output_width,output_height,step_x,step_y,prefilter_mode,palette_source,palette_cleanup_mode,cleanup_mode,repair_mode\n",
     );
     for row in rows {
         csv.push_str(&format!(
-            "{},{},{},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{},{},{},{:.4},{:.4},{},{},{},{},{}\n",
+            "{},{},{},{},{},{},{},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{},{},{},{:.4},{:.4},{},{},{},{},{}\n",
             row.rank,
             csv_escape(&row.relative_path),
             csv_escape(&row.output_relative_path),
+            csv_escape(&row.review_priority),
+            csv_escape(&row.recommended_profile),
+            csv_escape(&row.recommended_actions),
+            csv_escape(&row.recommendation_reason),
             row.quality_overall,
             row.diff_score,
             row.diff_area,

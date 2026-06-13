@@ -1352,14 +1352,83 @@ function getReviewPackTopN() {
   return Math.max(1, Math.min(50, value));
 }
 
+function buildAdaptiveBatchRecommendation(metrics, config = {}, paletteCount = 0) {
+  const overall = Number(metrics?.overall ?? NaN);
+  const diffScore = Number(metrics?.diffScore ?? 0);
+  const diffArea = Number(metrics?.diffArea ?? 0);
+  const grid = Number(metrics?.grid ?? 0);
+  const palette = Number(metrics?.palette ?? 0);
+  const coverage = Number(metrics?.coverage ?? 0);
+  const priority =
+    overall < 0.38 || diffArea > 0.32 ? "critical" : overall < 0.55 ? "high" : overall < 0.72 ? "medium" : "low";
+  const reason =
+    grid < 0.48
+      ? "focus principale: griglia instabile"
+      : palette < 0.6
+        ? "focus principale: palette dispersa"
+        : diffArea > 0.22
+          ? "focus principale: molta area differente"
+          : diffScore > 24
+            ? "focus principale: fedelta' bassa"
+            : "focus principale: rifinitura generale";
+  const profile =
+    grid < 0.42
+      ? "tileset-cleanup"
+      : diffArea > 0.26 || coverage < 0.45
+        ? "character-cleanup"
+        : palette < 0.55 || paletteCount > 24
+          ? "strict-retro"
+          : diffScore > 24
+            ? "ultra-cleanup"
+            : "ai-sprite";
+  const actions = [];
+  if (String(config.prefilter_mode ?? "off") === "off" && (diffScore > 22 || grid < 0.55)) {
+    actions.push("attiva denoise box3");
+  }
+  if (String(config.palette_source ?? "cells") !== "cells" && (grid < 0.58 || palette < 0.68)) {
+    actions.push("usa palette dalle celle");
+  }
+  if (String(config.palette_cleanup_mode ?? "basic") !== "strict" && (palette < 0.62 || paletteCount > 24)) {
+    actions.push("porta palette cleanup a strict");
+  }
+  if (String(config.cleanup_mode ?? "basic") === "off" && diffArea > 0.14) {
+    actions.push("attiva cleanup base");
+  }
+  if (String(config.repair_mode ?? "smart") === "off") {
+    actions.push("attiva repair smart");
+  } else if (String(config.repair_mode ?? "smart") === "basic" && diffArea > 0.18) {
+    actions.push("alza repair a smart");
+  } else if (String(config.repair_mode ?? "smart") !== "ultra" && (diffArea > 0.26 || overall < 0.38)) {
+    actions.push("prova repair ultra");
+  }
+  if (actions.length === 0) {
+    actions.push("mantieni setup attuale e verifica manualmente");
+  }
+  return {
+    review_priority: priority,
+    recommended_profile: profile,
+    recommended_actions: actions.join(" | "),
+    recommendation_reason: reason,
+  };
+}
+
 function buildBatchSummaryRows(results) {
   return sortBatchResultsForReview(results).map((entry, index) => {
     const quality = getBatchQuality(entry);
     const config = entry.debug?.config ?? {};
+    const recommendation = buildAdaptiveBatchRecommendation(
+      quality,
+      config,
+      Number(entry.debug?.palette_count ?? entry.debug?.palette?.length ?? 0),
+    );
     return {
       rank: index + 1,
       relative_path: String(entry.path || entry.name || ""),
       output_relative_path: toZipEntryName(entry.path || entry.name || ""),
+      review_priority: recommendation.review_priority,
+      recommended_profile: recommendation.recommended_profile,
+      recommended_actions: recommendation.recommended_actions,
+      recommendation_reason: recommendation.recommendation_reason,
       quality_overall: Number.isFinite(quality.overall) ? Number(quality.overall.toFixed(4)) : null,
       diff_score: Number(quality.diffScore.toFixed(4)),
       diff_area: Number(quality.diffArea.toFixed(4)),
@@ -1421,6 +1490,10 @@ function buildReviewPackCsv(results, topN = getReviewPackTopN()) {
     "rank",
     "relative_path",
     "output_relative_path",
+    "review_priority",
+    "recommended_profile",
+    "recommended_actions",
+    "recommendation_reason",
     "quality_overall",
     "diff_score",
     "diff_area",
@@ -1492,6 +1565,10 @@ function buildBatchSummaryCsv(results) {
     "rank",
     "relative_path",
     "output_relative_path",
+    "review_priority",
+    "recommended_profile",
+    "recommended_actions",
+    "recommendation_reason",
     "quality_overall",
     "diff_score",
     "diff_area",
@@ -1939,15 +2016,21 @@ function renderBatchReviewList(items) {
     }
 
     const quality = getBatchQuality(item.result);
+    const recommendation = buildAdaptiveBatchRecommendation(
+      quality,
+      item.result?.debug?.config ?? {},
+      Number(item.result?.debug?.palette_count ?? item.result?.debug?.palette?.length ?? 0),
+    );
     const overallText = Number.isFinite(quality.overall)
       ? `${Math.round(quality.overall * 100)}%`
       : "n/a";
     const diffText = Number(quality.diffScore ?? 0).toFixed(1);
     ui.row.classList.add(classifyBatchQuality(quality.overall));
-    ui.statusEl.textContent = `#${index + 1} q ${overallText} | diff ${diffText}`;
+    ui.statusEl.textContent = `#${index + 1} q ${overallText} | ${recommendation.recommended_profile}`;
     ui.statusEl.title =
       `quality ${overallText} | diff ${diffText} | area ${Math.round(quality.diffArea * 100)}% | ` +
-      `grid ${Math.round(quality.grid * 100)}% | palette ${Math.round(quality.palette * 100)}%`;
+      `grid ${Math.round(quality.grid * 100)}% | palette ${Math.round(quality.palette * 100)}% | ` +
+      `${recommendation.recommendation_reason} | azioni: ${recommendation.recommended_actions}`;
   }
 }
 
