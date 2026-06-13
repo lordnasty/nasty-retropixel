@@ -6,7 +6,7 @@ use nasty_retropixel::{
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 struct BatchSummaryRow {
     rank: usize,
     relative_path: String,
@@ -29,6 +29,13 @@ struct BatchSummaryRow {
     repair_mode: String,
 }
 
+#[derive(Debug)]
+struct BatchSummaryArtifacts {
+    json_path: PathBuf,
+    csv_path: PathBuf,
+    rows: Vec<BatchSummaryRow>,
+}
+
 fn main() {
     if let Err(e) = run() {
         eprintln!("{}", e);
@@ -40,7 +47,7 @@ fn run() -> nasty_retropixel::Result<()> {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 3 {
         return Err(nasty_retropixel::PixelSnapperError::InvalidInput(
-            "Usage: nasty-retropixel-cli <input> <output> [k_colors] [--preset ai-sprite|strict-retro|tileset-cleanup|character-cleanup|icon-cleanup|ultra-cleanup|auto] [--pixel-size <n>] [--denoise off|box3] [--palette-source pixels|cells] [--palette-lock <palette.png>] [--palette-cleanup off|basic|strict] [--cell-color mean|dominant|medoid] [--dither off|fs] [--color-space srgb|linear] [--cleanup off|basic] [--repair off|basic|smart|ultra] [--recommend-variant] [--debug-json] [--debug-overlay] [--debug-heatmap] [--debug-dir <path>]\n\nNotes:\n- Use a file input + file output for single image.\n- Use a directory input + directory output for batch processing.".to_string(),
+            "Usage: nasty-retropixel-cli <input> <output> [k_colors] [--preset ai-sprite|strict-retro|tileset-cleanup|character-cleanup|icon-cleanup|ultra-cleanup|auto] [--pixel-size <n>] [--denoise off|box3] [--palette-source pixels|cells] [--palette-lock <palette.png>] [--palette-cleanup off|basic|strict] [--cell-color mean|dominant|medoid] [--dither off|fs] [--color-space srgb|linear] [--cleanup off|basic] [--repair off|basic|smart|ultra] [--recommend-variant] [--debug-json] [--debug-overlay] [--debug-heatmap] [--debug-dir <path>] [--review-pack-top <n>]\n\nNotes:\n- Use a file input + file output for single image.\n- Use a directory input + directory output for batch processing.".to_string(),
         ));
     }
 
@@ -63,6 +70,7 @@ fn run() -> nasty_retropixel::Result<()> {
     let mut debug_overlay = false;
     let mut debug_heatmap = false;
     let mut debug_dir: Option<PathBuf> = None;
+    let mut review_pack_top: Option<usize> = None;
     let mut recommend_variant = false;
 
     let mut i = 3;
@@ -288,6 +296,23 @@ fn run() -> nasty_retropixel::Result<()> {
                 debug_dir = Some(PathBuf::from(val));
                 i += 2;
             }
+            "--review-pack-top" => {
+                let Some(val) = args.get(i + 1) else {
+                    return Err(nasty_retropixel::PixelSnapperError::InvalidInput(
+                        "--review-pack-top requires a value".to_string(),
+                    ));
+                };
+                match val.parse::<usize>() {
+                    Ok(v) if v > 0 => review_pack_top = Some(v),
+                    _ => {
+                        return Err(nasty_retropixel::PixelSnapperError::InvalidInput(format!(
+                            "invalid --review-pack-top '{}'",
+                            val
+                        )))
+                    }
+                }
+                i += 2;
+            }
             "--recommend-variant" => {
                 recommend_variant = true;
                 i += 1;
@@ -346,6 +371,11 @@ fn run() -> nasty_retropixel::Result<()> {
     }
     if let Some(v) = repair_mode {
         config.repair_mode = v;
+    }
+    if review_pack_top.is_some() {
+        debug_json = true;
+        debug_overlay = true;
+        debug_heatmap = true;
     }
     let debug = DebugExportOptions {
         write_json: debug_json,
@@ -548,14 +578,30 @@ fn run() -> nasty_retropixel::Result<()> {
                 .clone()
                 .unwrap_or_else(|| PathBuf::from(output));
             match write_batch_summary_reports(&debug_root) {
-                Ok(Some((json_path, csv_path, count))) => {
+                Ok(Some(artifacts)) => {
+                    let count = artifacts.rows.len();
                     println!(
                         "Batch quality summary: {} item{} -> {} | {}",
                         count,
                         if count == 1 { "" } else { "s" },
-                        json_path.display(),
-                        csv_path.display()
+                        artifacts.json_path.display(),
+                        artifacts.csv_path.display()
                     );
+                    if let Some(top_n) = review_pack_top {
+                        let review_root = write_review_pack(
+                            &debug_root,
+                            output,
+                            &artifacts.rows,
+                            top_n,
+                        )?;
+                        let exported = artifacts.rows.len().min(top_n);
+                        println!(
+                            "Review pack: top {} worst case{} -> {}",
+                            exported,
+                            if exported == 1 { "" } else { "s" },
+                            review_root.display()
+                        );
+                    }
                 }
                 Ok(None) => {}
                 Err(err) => {
@@ -568,6 +614,12 @@ fn run() -> nasty_retropixel::Result<()> {
         }
 
         return batch_result;
+    }
+
+    if review_pack_top.is_some() {
+        return Err(nasty_retropixel::PixelSnapperError::InvalidInput(
+            "--review-pack-top is supported only for batch directory input".to_string(),
+        ));
     }
 
     let actual_output_path = if output.is_dir() {
@@ -606,7 +658,7 @@ fn run() -> nasty_retropixel::Result<()> {
 
 fn write_batch_summary_reports(
     debug_root: &Path,
-) -> nasty_retropixel::Result<Option<(PathBuf, PathBuf, usize)>> {
+) -> nasty_retropixel::Result<Option<BatchSummaryArtifacts>> {
     let mut debug_files = Vec::new();
     collect_debug_json_files(debug_root, &mut debug_files)?;
     debug_files.sort();
@@ -732,7 +784,114 @@ fn write_batch_summary_reports(
         ))
     })?;
 
-    Ok(Some((json_path, csv_path, rows.len())))
+    Ok(Some(BatchSummaryArtifacts {
+        json_path,
+        csv_path,
+        rows,
+    }))
+}
+
+fn write_review_pack(
+    debug_root: &Path,
+    output_root: &Path,
+    rows: &[BatchSummaryRow],
+    top_n: usize,
+) -> nasty_retropixel::Result<PathBuf> {
+    let selected = rows.iter().take(top_n).collect::<Vec<_>>();
+    let review_root = debug_root.join("nasty-retropixel.review-pack");
+    std::fs::create_dir_all(&review_root).map_err(|e| {
+        nasty_retropixel::PixelSnapperError::ProcessingError(format!(
+            "Failed to create review pack directory '{}': {}",
+            review_root.display(),
+            e
+        ))
+    })?;
+
+    let payload = serde_json::json!({
+        "count": selected.len(),
+        "source_count": rows.len(),
+        "focus": "top_worst_only",
+        "rows": selected,
+    });
+    let manifest_json = review_root.join("nasty-retropixel.review-pack.json");
+    std::fs::write(
+        &manifest_json,
+        serde_json::to_vec_pretty(&payload).map_err(|e| {
+            nasty_retropixel::PixelSnapperError::ProcessingError(format!(
+                "Failed to serialize review pack manifest '{}': {}",
+                manifest_json.display(),
+                e
+            ))
+        })?,
+    )
+    .map_err(|e| {
+        nasty_retropixel::PixelSnapperError::ProcessingError(format!(
+            "Failed to write review pack manifest '{}': {}",
+            manifest_json.display(),
+            e
+        ))
+    })?;
+
+    let manifest_csv = review_root.join("nasty-retropixel.review-pack.csv");
+    std::fs::write(
+        &manifest_csv,
+        build_batch_summary_csv(
+            &selected.iter().map(|row| (*row).clone()).collect::<Vec<BatchSummaryRow>>(),
+        ),
+    )
+    .map_err(|e| {
+        nasty_retropixel::PixelSnapperError::ProcessingError(format!(
+            "Failed to write review pack CSV '{}': {}",
+            manifest_csv.display(),
+            e
+        ))
+    })?;
+
+    for row in selected {
+        let output_src = output_root.join(&row.output_relative_path);
+        let output_dst = review_root.join("outputs").join(&row.output_relative_path);
+        copy_if_exists(&output_src, &output_dst)?;
+
+        let debug_json_src = debug_root.join(&row.relative_path);
+        let debug_json_dst = review_root.join("debug").join(&row.relative_path);
+        copy_if_exists(&debug_json_src, &debug_json_dst)?;
+
+        let overlay_rel = row.relative_path.replace(".debug.json", ".overlay.png");
+        let overlay_src = debug_root.join(&overlay_rel);
+        let overlay_dst = review_root.join("debug").join(&overlay_rel);
+        copy_if_exists(&overlay_src, &overlay_dst)?;
+
+        let heatmap_rel = row.relative_path.replace(".debug.json", ".heatmap.png");
+        let heatmap_src = debug_root.join(&heatmap_rel);
+        let heatmap_dst = review_root.join("debug").join(&heatmap_rel);
+        copy_if_exists(&heatmap_src, &heatmap_dst)?;
+    }
+
+    Ok(review_root)
+}
+
+fn copy_if_exists(src: &Path, dst: &Path) -> nasty_retropixel::Result<()> {
+    if !src.exists() {
+        return Ok(());
+    }
+    if let Some(parent) = dst.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            nasty_retropixel::PixelSnapperError::ProcessingError(format!(
+                "Failed to create directory '{}': {}",
+                parent.display(),
+                e
+            ))
+        })?;
+    }
+    std::fs::copy(src, dst).map_err(|e| {
+        nasty_retropixel::PixelSnapperError::ProcessingError(format!(
+            "Failed to copy '{}' -> '{}': {}",
+            src.display(),
+            dst.display(),
+            e
+        ))
+    })?;
+    Ok(())
 }
 
 fn collect_debug_json_files(root: &Path, out: &mut Vec<PathBuf>) -> nasty_retropixel::Result<()> {

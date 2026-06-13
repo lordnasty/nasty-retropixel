@@ -391,6 +391,14 @@
             <input id="batchIncludeDebug" type="checkbox" />
             Includi debug nel ZIP (JSON + overlay)
           </label>
+          <label class="toggleRow compactToggle">
+            <input id="batchReviewPackEnabled" type="checkbox" />
+            Review pack peggiori risultati
+          </label>
+          <div class="field compact">
+            <label for="batchReviewPackTopN">Top peggiori nel review pack</label>
+            <input id="batchReviewPackTopN" type="number" min="1" max="50" step="1" value="5" />
+          </div>
         </div>
 
         <div class="drawerSection">

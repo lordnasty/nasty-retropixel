@@ -92,6 +92,8 @@ const els = {
   showPalette: document.getElementById("showPalette"),
   zipStatus: document.getElementById("zipStatus"),
   batchIncludeDebug: document.getElementById("batchIncludeDebug"),
+  batchReviewPackEnabled: document.getElementById("batchReviewPackEnabled"),
+  batchReviewPackTopN: document.getElementById("batchReviewPackTopN"),
   batchReviewFilter: document.getElementById("batchReviewFilter"),
   batchReviewSummary: document.getElementById("batchReviewSummary"),
   batchList: document.getElementById("batchList"),
@@ -184,6 +186,8 @@ const REQUIRED_KEYS = [
   "showGrid",
   "zipStatus",
   "batchIncludeDebug",
+  "batchReviewPackEnabled",
+  "batchReviewPackTopN",
   "batchReviewFilter",
   "batchReviewSummary",
   "batchList",
@@ -992,6 +996,8 @@ function writeSettings() {
       showGrid: els.showGrid.checked,
       downloadMode: getDownloadMode(),
       batchIncludeDebug: els.batchIncludeDebug.checked,
+      batchReviewPackEnabled: els.batchReviewPackEnabled.checked,
+      batchReviewPackTopN: els.batchReviewPackTopN.value,
       batchReviewFilter: els.batchReviewFilter.value,
     };
     localStorage.setItem(STORAGE_KEY, JSON.stringify(settings));
@@ -1026,6 +1032,10 @@ function applySettings(settings) {
   if (settings.showGrid != null) els.showGrid.checked = Boolean(settings.showGrid);
   if (settings.batchIncludeDebug != null)
     els.batchIncludeDebug.checked = Boolean(settings.batchIncludeDebug);
+  if (settings.batchReviewPackEnabled != null)
+    els.batchReviewPackEnabled.checked = Boolean(settings.batchReviewPackEnabled);
+  if (settings.batchReviewPackTopN != null)
+    els.batchReviewPackTopN.value = String(settings.batchReviewPackTopN);
   if (settings.batchReviewFilter != null)
     els.batchReviewFilter.value = String(settings.batchReviewFilter);
   if (settings.downloadMode === "zip") {
@@ -1179,7 +1189,12 @@ function updateUiFromSettings() {
   els.downloadAllBtn.textContent = els.batchMode.checked ? "Scarica Tutto" : "Scarica PNG";
   els.batchList.parentElement.classList.toggle("hidden", !els.batchMode.checked);
   els.batchIncludeDebug.parentElement.classList.toggle("hidden", !els.batchMode.checked);
+  els.batchReviewPackEnabled.parentElement.classList.toggle("hidden", !els.batchMode.checked);
+  els.batchReviewPackTopN.parentElement.classList.toggle("hidden", !els.batchMode.checked);
   els.batchIncludeDebug.disabled = !els.batchMode.checked || getDownloadMode() !== "zip";
+  els.batchReviewPackEnabled.disabled = !els.batchMode.checked || getDownloadMode() !== "zip";
+  els.batchReviewPackTopN.disabled =
+    !els.batchMode.checked || getDownloadMode() !== "zip" || !els.batchReviewPackEnabled.checked;
   els.folderMode.parentElement.classList.toggle("hidden", !els.batchMode.checked);
   els.batchReviewFilter.parentElement.classList.toggle("hidden", !els.batchMode.checked);
   els.batchReviewSummary.classList.toggle("hidden", !els.batchMode.checked);
@@ -1331,6 +1346,12 @@ function sortBatchResultsForReview(results) {
   });
 }
 
+function getReviewPackTopN() {
+  const value = Number.parseInt(els.batchReviewPackTopN.value, 10);
+  if (!Number.isFinite(value) || value <= 0) return 5;
+  return Math.max(1, Math.min(50, value));
+}
+
 function buildBatchSummaryRows(results) {
   return sortBatchResultsForReview(results).map((entry, index) => {
     const quality = getBatchQuality(entry);
@@ -1378,6 +1399,86 @@ function buildBatchSummaryPayload(results) {
     best: rows[rows.length - 1] ?? null,
     rows,
   };
+}
+
+function buildReviewPackRows(results, topN = getReviewPackTopN()) {
+  return buildBatchSummaryRows(results).slice(0, Math.max(1, topN));
+}
+
+function buildReviewPackPayload(results, topN = getReviewPackTopN()) {
+  const rows = buildReviewPackRows(results, topN);
+  return {
+    count: rows.length,
+    source_count: Array.isArray(results) ? results.length : 0,
+    focus: "top_worst_only",
+    rows,
+  };
+}
+
+function buildReviewPackCsv(results, topN = getReviewPackTopN()) {
+  const rows = buildReviewPackRows(results, topN);
+  const header = [
+    "rank",
+    "relative_path",
+    "output_relative_path",
+    "quality_overall",
+    "diff_score",
+    "diff_area",
+    "grid_regularity",
+    "palette_compactness",
+    "coverage_ratio",
+    "palette_count",
+    "output_width",
+    "output_height",
+    "step_x",
+    "step_y",
+    "prefilter_mode",
+    "palette_source",
+    "palette_cleanup_mode",
+    "cleanup_mode",
+    "repair_mode",
+  ];
+  const lines = [header.join(",")];
+  for (const row of rows) {
+    lines.push(header.map((key) => csvEscape(row[key])).join(","));
+  }
+  return lines.join("\n");
+}
+
+function appendReviewPackEntries(entries, results, includeDebug, enc, topN = getReviewPackTopN()) {
+  const selected = sortBatchResultsForReview(results).slice(0, Math.max(1, topN));
+  for (const r of selected) {
+    entries.push({
+      name: `nasty-retropixel.review-pack/outputs/${toZipEntryName(r.path || r.name)}`,
+      bytes: r.bytes,
+    });
+    if (includeDebug && r.debug) {
+      entries.push({
+        name: `nasty-retropixel.review-pack/debug/${toZipDebugName(r.path || r.name)}`,
+        bytes: enc.encode(JSON.stringify(r.debug, null, 2)),
+      });
+      if (r.overlayBytes && r.overlayBytes.length > 0) {
+        entries.push({
+          name: `nasty-retropixel.review-pack/debug/${toZipOverlayName(r.path || r.name)}`,
+          bytes: r.overlayBytes,
+        });
+      }
+      if (r.heatmapBytes && r.heatmapBytes.length > 0) {
+        entries.push({
+          name: `nasty-retropixel.review-pack/debug/${toZipHeatmapName(r.path || r.name)}`,
+          bytes: r.heatmapBytes,
+        });
+      }
+    }
+  }
+  entries.push({
+    name: "nasty-retropixel.review-pack/nasty-retropixel.review-pack.json",
+    bytes: enc.encode(JSON.stringify(buildReviewPackPayload(results, topN), null, 2)),
+  });
+  entries.push({
+    name: "nasty-retropixel.review-pack/nasty-retropixel.review-pack.csv",
+    bytes: enc.encode(buildReviewPackCsv(results, topN)),
+  });
 }
 
 function csvEscape(value) {
@@ -2909,6 +3010,16 @@ els.batchReviewFilter.addEventListener("change", () => {
   writeSettings();
 });
 
+els.batchReviewPackEnabled.addEventListener("change", () => {
+  updateUiFromSettings();
+  writeSettings();
+});
+
+els.batchReviewPackTopN.addEventListener("change", () => {
+  els.batchReviewPackTopN.value = String(getReviewPackTopN());
+  writeSettings();
+});
+
 els.clearQualityHistoryBtn.addEventListener("click", () => {
   qualityHistory = [];
   writeQualityHistory();
@@ -3006,7 +3117,8 @@ els.processBtn.addEventListener("click", async () => {
       failed: false,
       error: null,
     }));
-    const includeBatchDebug = els.batchIncludeDebug.checked && getDownloadMode() === "zip";
+    const includeReviewPack = els.batchReviewPackEnabled.checked && getDownloadMode() === "zip";
+    const includeBatchDebug = (els.batchIncludeDebug.checked || includeReviewPack) && getDownloadMode() === "zip";
     for (const it of items) {
       it.ui.statusEl.textContent = "processing...";
       try {
@@ -3101,7 +3213,8 @@ els.downloadAllBtn.addEventListener("click", async () => {
   if (getDownloadMode() === "zip") {
     try {
       els.zipStatus.textContent = "ZIP: generazione...";
-      const includeDebug = els.batchIncludeDebug.checked;
+      const includeReviewPack = els.batchReviewPackEnabled.checked;
+      const includeDebug = els.batchIncludeDebug.checked || includeReviewPack;
       const enc = new TextEncoder();
       const entries = [];
       for (const r of batchResults) {
@@ -3128,6 +3241,9 @@ els.downloadAllBtn.addEventListener("click", async () => {
           name: "nasty-retropixel.batch-summary.csv",
           bytes: enc.encode(buildBatchSummaryCsv(batchResults)),
         });
+        if (includeReviewPack) {
+          appendReviewPackEntries(entries, batchResults, includeDebug, enc, getReviewPackTopN());
+        }
       }
       const zipBytes = buildZipStore(entries);
       const blob = new Blob([zipBytes], { type: "application/zip" });
