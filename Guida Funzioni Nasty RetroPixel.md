@@ -81,10 +81,12 @@ Nota attuale:
 - la GUI esporta debug singolo via download e, in batch ZIP, include anche JSON + overlay + heatmap;
 - la GUI batch puo' includere anche `nasty-retropixel.batch-summary.json` e `nasty-retropixel.batch-summary.csv` nello ZIP debug;
 - la GUI batch puo' generare anche `nasty-retropixel.review-pack/` con i peggiori `N` risultati, output finali e artefatti debug gia' pronti alla review;
+- la GUI batch puo' generare anche `nasty-retropixel.retry-review/`, che prova retry guidati sui casi peggiori ed esporta solo i tentativi che migliorano davvero il baseline;
 - summary batch e review pack includono anche priorita', preset consigliato e azioni suggerite per il retry successivo;
 - il batch del core e della CLI e' ricorsivo e preserva la struttura delle sottocartelle in output/debug;
 - la CLI, quando esporta `debug.json` in batch, genera anche un riepilogo ordinato per qualita' (`batch-summary.json/csv`) nella root debug;
 - la CLI supporta `--review-pack-top <n>` e crea una cartella `nasty-retropixel.review-pack/` con top worst output, debug json, overlay, heatmap e manifest;
+- il manifest del review pack CLI include anche `retry_plan_candidates` con baseline quality, priorita', preset consigliato e azioni operative per il retry manuale successivo;
 - la GUI batch preserva i path interni quando selezioni una cartella e scarichi lo ZIP.
 - il confronto varianti della GUI usa la heatmap del core quando disponibile e ordina i risultati mettendo in evidenza la variante consigliata.
 - la GUI salva in locale uno storico sintetico di output singoli e batch recenti, utile per riprendere il lavoro dopo il riavvio;
@@ -476,7 +478,8 @@ Funzioni disponibili:
 - download PNG singolo;
 - trim trasparenza;
 - upscale nearest 1x / 2x / 4x / 8x;
-- download batch singolo oppure ZIP offline.
+- download batch singolo oppure ZIP offline;
+- retry review assistito sui peggiori casi batch, con confronto baseline vs miglior retry e export solo dei casi migliorati.
 
 ## Funzioni CLI
 

@@ -93,6 +93,7 @@ const els = {
   zipStatus: document.getElementById("zipStatus"),
   batchIncludeDebug: document.getElementById("batchIncludeDebug"),
   batchReviewPackEnabled: document.getElementById("batchReviewPackEnabled"),
+  batchRetryReviewEnabled: document.getElementById("batchRetryReviewEnabled"),
   batchReviewPackTopN: document.getElementById("batchReviewPackTopN"),
   batchReviewFilter: document.getElementById("batchReviewFilter"),
   batchReviewSummary: document.getElementById("batchReviewSummary"),
@@ -187,6 +188,7 @@ const REQUIRED_KEYS = [
   "zipStatus",
   "batchIncludeDebug",
   "batchReviewPackEnabled",
+  "batchRetryReviewEnabled",
   "batchReviewPackTopN",
   "batchReviewFilter",
   "batchReviewSummary",
@@ -997,6 +999,7 @@ function writeSettings() {
       downloadMode: getDownloadMode(),
       batchIncludeDebug: els.batchIncludeDebug.checked,
       batchReviewPackEnabled: els.batchReviewPackEnabled.checked,
+      batchRetryReviewEnabled: els.batchRetryReviewEnabled.checked,
       batchReviewPackTopN: els.batchReviewPackTopN.value,
       batchReviewFilter: els.batchReviewFilter.value,
     };
@@ -1034,6 +1037,8 @@ function applySettings(settings) {
     els.batchIncludeDebug.checked = Boolean(settings.batchIncludeDebug);
   if (settings.batchReviewPackEnabled != null)
     els.batchReviewPackEnabled.checked = Boolean(settings.batchReviewPackEnabled);
+  if (settings.batchRetryReviewEnabled != null)
+    els.batchRetryReviewEnabled.checked = Boolean(settings.batchRetryReviewEnabled);
   if (settings.batchReviewPackTopN != null)
     els.batchReviewPackTopN.value = String(settings.batchReviewPackTopN);
   if (settings.batchReviewFilter != null)
@@ -1190,9 +1195,12 @@ function updateUiFromSettings() {
   els.batchList.parentElement.classList.toggle("hidden", !els.batchMode.checked);
   els.batchIncludeDebug.parentElement.classList.toggle("hidden", !els.batchMode.checked);
   els.batchReviewPackEnabled.parentElement.classList.toggle("hidden", !els.batchMode.checked);
+  els.batchRetryReviewEnabled.parentElement.classList.toggle("hidden", !els.batchMode.checked);
   els.batchReviewPackTopN.parentElement.classList.toggle("hidden", !els.batchMode.checked);
   els.batchIncludeDebug.disabled = !els.batchMode.checked || getDownloadMode() !== "zip";
   els.batchReviewPackEnabled.disabled = !els.batchMode.checked || getDownloadMode() !== "zip";
+  els.batchRetryReviewEnabled.disabled =
+    !els.batchMode.checked || getDownloadMode() !== "zip" || !els.batchReviewPackEnabled.checked;
   els.batchReviewPackTopN.disabled =
     !els.batchMode.checked || getDownloadMode() !== "zip" || !els.batchReviewPackEnabled.checked;
   els.folderMode.parentElement.classList.toggle("hidden", !els.batchMode.checked);
@@ -1352,6 +1360,36 @@ function getReviewPackTopN() {
   return Math.max(1, Math.min(50, value));
 }
 
+function debugConfigToAlgo(config = {}) {
+  const mapValue = (value, mapping, fallback) => {
+    const key = String(value ?? "").toLowerCase();
+    return Object.prototype.hasOwnProperty.call(mapping, key) ? mapping[key] : fallback;
+  };
+  return {
+    denoise: mapValue(config.prefilter_mode, { off: 0, box3: 1 }, 0),
+    paletteSource: mapValue(config.palette_source, { pixels: 0, cells: 1 }, 1),
+    paletteCleanupMode: mapValue(config.palette_cleanup_mode, { off: 0, basic: 1, strict: 2 }, 1),
+    cellColorMode: mapValue(config.cell_color_mode, { mean: 0, dominant: 1, medoid: 2 }, 1),
+    dither: mapValue(config.dither_mode, { off: 0, fs: 1 }, 0),
+    colorSpace: mapValue(config.color_space, { srgb: 0, linear: 1 }, 1),
+    cleanupMode: mapValue(config.cleanup_mode, { off: 0, basic: 1 }, 1),
+    repairMode: mapValue(config.repair_mode, { off: 0, basic: 1, smart: 2, ultra: 3 }, 2),
+  };
+}
+
+function presetConfigToAlgo(presetConfig = {}, fallback = {}) {
+  return {
+    denoise: Number(presetConfig.prefilter_mode ?? fallback.denoise ?? 0),
+    paletteSource: Number(presetConfig.palette_source ?? fallback.paletteSource ?? 1),
+    paletteCleanupMode: Number(presetConfig.palette_cleanup_mode ?? fallback.paletteCleanupMode ?? 1),
+    cellColorMode: Number(presetConfig.cell_color_mode ?? fallback.cellColorMode ?? 1),
+    dither: Number(presetConfig.dither_mode ?? fallback.dither ?? 0),
+    colorSpace: Number(presetConfig.color_space ?? fallback.colorSpace ?? 1),
+    cleanupMode: Number(presetConfig.cleanup_mode ?? fallback.cleanupMode ?? 1),
+    repairMode: Number(presetConfig.repair_mode ?? fallback.repairMode ?? 2),
+  };
+}
+
 function buildAdaptiveBatchRecommendation(metrics, config = {}, paletteCount = 0) {
   const overall = Number(metrics?.overall ?? NaN);
   const diffScore = Number(metrics?.diffScore ?? 0);
@@ -1409,6 +1447,71 @@ function buildAdaptiveBatchRecommendation(metrics, config = {}, paletteCount = 0
     recommended_profile: profile,
     recommended_actions: actions.join(" | "),
     recommendation_reason: reason,
+  };
+}
+
+function buildRetryCandidatePlans(entry) {
+  const quality = getBatchQuality(entry);
+  const config = entry?.debug?.config ?? {};
+  const paletteCount = Number(entry?.debug?.palette_count ?? entry?.debug?.palette?.length ?? 0);
+  const recommendation = buildAdaptiveBatchRecommendation(quality, config, paletteCount);
+  const baseAlgo = debugConfigToAlgo(config);
+  const recommendedPreset = presetConfigToAlgo(get_preset_config(recommendation.recommended_profile), baseAlgo);
+  const candidates = [
+    {
+      key: "recommended-profile",
+      label: `Profilo ${recommendation.recommended_profile}`,
+      reason: recommendation.recommendation_reason,
+      algoOverrides: {
+        ...baseAlgo,
+        ...recommendedPreset,
+      },
+    },
+    {
+      key: "stability-pass",
+      label: "Stability Pass",
+      reason: "Rinforza griglia, palette dalle celle e repair medio.",
+      algoOverrides: {
+        ...baseAlgo,
+        denoise: Math.max(Number(baseAlgo.denoise ?? 0), 1),
+        paletteSource: 1,
+        paletteCleanupMode: Math.max(Number(baseAlgo.paletteCleanupMode ?? 1), paletteCount > 24 ? 2 : 1),
+        cellColorMode: Math.max(Number(baseAlgo.cellColorMode ?? 1), 1),
+        cleanupMode: Math.max(Number(baseAlgo.cleanupMode ?? 1), 1),
+        repairMode: Math.max(Number(baseAlgo.repairMode ?? 2), 2),
+      },
+    },
+    {
+      key: "recovery-pass",
+      label: "Recovery Pass",
+      reason: "Pass aggressivo per casi molto degradati o con grande area differente.",
+      algoOverrides: {
+        ...baseAlgo,
+        denoise: 1,
+        paletteSource: 1,
+        paletteCleanupMode: 2,
+        cellColorMode: 2,
+        cleanupMode: 1,
+        repairMode: 3,
+      },
+    },
+  ];
+
+  const seen = new Set();
+  return candidates.filter((candidate) => {
+    const key = JSON.stringify(candidate.algoOverrides);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function serializeRetryCandidatePlan(plan) {
+  return {
+    key: plan.key,
+    label: plan.label,
+    reason: plan.reason,
+    algo_overrides: { ...(plan.algoOverrides ?? {}) },
   };
 }
 
@@ -1480,6 +1583,20 @@ function buildReviewPackPayload(results, topN = getReviewPackTopN()) {
     count: rows.length,
     source_count: Array.isArray(results) ? results.length : 0,
     focus: "top_worst_only",
+    retry_plan_candidates: rows.map((row) => {
+      const entry = (Array.isArray(results) ? results : []).find(
+        (item) => String(item.path || item.name || "") === String(row.relative_path || ""),
+      );
+      return {
+        relative_path: row.relative_path,
+        baseline_quality: row.quality_overall,
+        review_priority: row.review_priority,
+        recommended_profile: row.recommended_profile,
+        recommended_actions: row.recommended_actions,
+        recommendation_reason: row.recommendation_reason,
+        candidates: entry ? buildRetryCandidatePlans(entry).map(serializeRetryCandidatePlan) : [],
+      };
+    }),
     rows,
   };
 }
@@ -1551,6 +1668,218 @@ function appendReviewPackEntries(entries, results, includeDebug, enc, topN = get
   entries.push({
     name: "nasty-retropixel.review-pack/nasty-retropixel.review-pack.csv",
     bytes: enc.encode(buildReviewPackCsv(results, topN)),
+  });
+}
+
+function buildRetryReviewCsv(payload) {
+  const header = [
+    "relative_path",
+    "retry_status",
+    "baseline_quality",
+    "best_retry_candidate",
+    "best_retry_quality",
+    "best_retry_delta_quality",
+    "selected_candidate",
+    "selected_quality",
+    "selected_delta_quality",
+    "exported_output_relative_path",
+    "recommended_profile",
+    "recommended_actions",
+    "recommendation_reason",
+  ];
+  const lines = [header.join(",")];
+  for (const row of payload.rows ?? []) {
+    lines.push(
+      [
+        row.relative_path,
+        row.retry_status ?? "not_evaluated",
+        row.baseline_quality,
+        row.best_retry_candidate?.label ?? "baseline",
+        row.best_retry_candidate?.quality_overall ?? row.baseline_quality,
+        row.best_retry_candidate?.delta_quality ?? 0,
+        row.selected_candidate?.label ?? "",
+        row.selected_candidate?.quality_overall ?? "",
+        row.selected_candidate?.delta_quality ?? "",
+        row.exported_output_relative_path ?? "",
+        row.recommended_profile,
+        row.recommended_actions,
+        row.recommendation_reason,
+      ]
+        .map((value) => csvEscape(value))
+        .join(","),
+    );
+  }
+  return lines.join("\n");
+}
+
+async function evaluateRetryReviewPayload(results, topN = getReviewPackTopN(), progress = null) {
+  const fileByPath = new Map(
+    selectedFiles.map((file) => [String(file.webkitRelativePath || file.name), file]),
+  );
+  const chosen = sortBatchResultsForReview(results).slice(0, Math.max(1, topN));
+  const rows = [];
+
+  for (const [index, entry] of chosen.entries()) {
+    const relativePath = String(entry.path || entry.name || "");
+    const file = fileByPath.get(relativePath);
+    if (!file || !entry.debug) continue;
+
+    if (typeof progress === "function") {
+      progress(index + 1, chosen.length, relativePath);
+    }
+
+    const baselineQuality = getBatchQuality(entry);
+    const recommendation = buildAdaptiveBatchRecommendation(
+      baselineQuality,
+      entry.debug?.config ?? {},
+      Number(entry.debug?.palette_count ?? entry.debug?.palette?.length ?? 0),
+    );
+    const candidates = [];
+    let bestRetryCandidate = null;
+    let selectedCandidate = null;
+    let selectedResult = null;
+    const ctx = await resolveSingleFileContext(file);
+
+    for (const plan of buildRetryCandidatePlans(entry)) {
+      try {
+        const result = await processResolvedSingleFile(ctx, {
+          includeDebug: true,
+          algoOverrides: plan.algoOverrides,
+          trimTransparentOverride: ctx.trimTransparent,
+        });
+        const quality = getVariantQuality(result);
+        const deltaQuality = Number((quality.overall - baselineQuality.overall).toFixed(4));
+        const candidate = {
+          key: plan.key,
+          label: plan.label,
+          reason: plan.reason,
+          quality_overall: Number(quality.overall.toFixed(4)),
+          diff_score: Number(quality.diffScore.toFixed(4)),
+          diff_area: Number(quality.diffArea.toFixed(4)),
+          delta_quality: deltaQuality,
+        };
+        candidates.push(candidate);
+        if (
+          !bestRetryCandidate ||
+          deltaQuality > Number(bestRetryCandidate.delta_quality ?? -Infinity)
+        ) {
+          bestRetryCandidate = candidate;
+        }
+        if (
+          deltaQuality > 0 &&
+          (!selectedCandidate || deltaQuality > Number(selectedCandidate.delta_quality ?? -Infinity))
+        ) {
+          selectedCandidate = candidate;
+          selectedResult = result;
+        }
+      } catch (error) {
+        candidates.push({
+          key: plan.key,
+          label: plan.label,
+          reason: plan.reason,
+          error: String(error),
+        });
+      }
+    }
+
+    const retryStatus = selectedCandidate
+      ? "improved"
+      : bestRetryCandidate
+        ? "no_gain"
+        : candidates.length > 0
+          ? "attempt_failed"
+          : "not_available";
+    const exportedOutputRelativePath = selectedCandidate
+      ? `nasty-retropixel.retry-review/outputs/${toZipEntryName(relativePath)}`
+      : null;
+
+    rows.push({
+      relative_path: relativePath,
+      retry_status: retryStatus,
+      baseline_quality: Number(baselineQuality.overall.toFixed(4)),
+      recommended_profile: recommendation.recommended_profile,
+      recommended_actions: recommendation.recommended_actions,
+      recommendation_reason: recommendation.recommendation_reason,
+      best_retry_candidate: bestRetryCandidate,
+      selected_candidate: selectedCandidate,
+      candidates,
+      exported_output_relative_path: exportedOutputRelativePath,
+      best_result: selectedResult
+        ? {
+            bytes: selectedResult.bytes,
+            debug: selectedResult.debug,
+            overlayBytes: selectedResult.overlayBytes,
+            heatmapBytes: selectedResult.heatmapBytes,
+          }
+        : null,
+    });
+  }
+
+  const improvedCount = rows.filter((row) => row.retry_status === "improved").length;
+  return {
+    count: rows.length,
+    source_count: Array.isArray(results) ? results.length : 0,
+    focus: "top_worst_retry_review",
+    requested_top_n: Math.max(1, topN),
+    improved_count: improvedCount,
+    exported_count: improvedCount,
+    rows,
+  };
+}
+
+function appendRetryReviewEntries(entries, payload, enc) {
+  for (const row of payload.rows ?? []) {
+    if (!row.best_result?.bytes || !row.selected_candidate) continue;
+    entries.push({
+      name: `nasty-retropixel.retry-review/outputs/${toZipEntryName(row.relative_path)}`,
+      bytes: row.best_result.bytes,
+    });
+    if (row.best_result.debug) {
+      entries.push({
+        name: `nasty-retropixel.retry-review/debug/${toZipDebugName(row.relative_path)}`,
+        bytes: enc.encode(JSON.stringify(row.best_result.debug, null, 2)),
+      });
+    }
+    if (row.best_result.overlayBytes?.length > 0) {
+      entries.push({
+        name: `nasty-retropixel.retry-review/debug/${toZipOverlayName(row.relative_path)}`,
+        bytes: row.best_result.overlayBytes,
+      });
+    }
+    if (row.best_result.heatmapBytes?.length > 0) {
+      entries.push({
+        name: `nasty-retropixel.retry-review/debug/${toZipHeatmapName(row.relative_path)}`,
+        bytes: row.best_result.heatmapBytes,
+      });
+    }
+  }
+  const serializable = {
+    count: payload.count,
+    source_count: payload.source_count,
+    focus: payload.focus,
+    requested_top_n: payload.requested_top_n,
+    improved_count: payload.improved_count,
+    exported_count: payload.exported_count,
+    rows: (payload.rows ?? []).map((row) => ({
+      relative_path: row.relative_path,
+      retry_status: row.retry_status,
+      baseline_quality: row.baseline_quality,
+      recommended_profile: row.recommended_profile,
+      recommended_actions: row.recommended_actions,
+      recommendation_reason: row.recommendation_reason,
+      best_retry_candidate: row.best_retry_candidate,
+      selected_candidate: row.selected_candidate,
+      exported_output_relative_path: row.exported_output_relative_path,
+      candidates: row.candidates,
+    })),
+  };
+  entries.push({
+    name: "nasty-retropixel.retry-review/nasty-retropixel.retry-review.json",
+    bytes: enc.encode(JSON.stringify(serializable, null, 2)),
+  });
+  entries.push({
+    name: "nasty-retropixel.retry-review/nasty-retropixel.retry-review.csv",
+    bytes: enc.encode(buildRetryReviewCsv(serializable)),
   });
 }
 
@@ -3098,6 +3427,11 @@ els.batchReviewPackEnabled.addEventListener("change", () => {
   writeSettings();
 });
 
+els.batchRetryReviewEnabled.addEventListener("change", () => {
+  updateUiFromSettings();
+  writeSettings();
+});
+
 els.batchReviewPackTopN.addEventListener("change", () => {
   els.batchReviewPackTopN.value = String(getReviewPackTopN());
   writeSettings();
@@ -3297,6 +3631,7 @@ els.downloadAllBtn.addEventListener("click", async () => {
     try {
       els.zipStatus.textContent = "ZIP: generazione...";
       const includeReviewPack = els.batchReviewPackEnabled.checked;
+      const includeRetryReview = els.batchRetryReviewEnabled.checked && includeReviewPack;
       const includeDebug = els.batchIncludeDebug.checked || includeReviewPack;
       const enc = new TextEncoder();
       const entries = [];
@@ -3327,6 +3662,16 @@ els.downloadAllBtn.addEventListener("click", async () => {
         if (includeReviewPack) {
           appendReviewPackEntries(entries, batchResults, includeDebug, enc, getReviewPackTopN());
         }
+      }
+      if (includeRetryReview) {
+        const retryPayload = await evaluateRetryReviewPayload(
+          batchResults,
+          getReviewPackTopN(),
+          (index, total, path) => {
+            els.zipStatus.textContent = `ZIP: retry review ${index}/${total} (${path})...`;
+          },
+        );
+        appendRetryReviewEntries(entries, retryPayload, enc);
       }
       const zipBytes = buildZipStore(entries);
       const blob = new Blob([zipBytes], { type: "application/zip" });

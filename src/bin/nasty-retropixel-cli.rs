@@ -40,6 +40,29 @@ struct BatchSummaryArtifacts {
     rows: Vec<BatchSummaryRow>,
 }
 
+fn build_retry_plan_candidates(row: &BatchSummaryRow) -> Vec<serde_json::Value> {
+    let mut plans = Vec::new();
+    plans.push(serde_json::json!({
+        "key": "recommended-profile",
+        "label": format!("Profilo {}", row.recommended_profile),
+        "reason": row.recommendation_reason,
+        "actions": row.recommended_actions,
+    }));
+    plans.push(serde_json::json!({
+        "key": "stability-pass",
+        "label": "Stability Pass",
+        "reason": "rinforza griglia, palette dalle celle e repair medio",
+        "actions": "attiva denoise box3 | usa palette dalle celle | attiva/alza repair smart",
+    }));
+    plans.push(serde_json::json!({
+        "key": "recovery-pass",
+        "label": "Recovery Pass",
+        "reason": "pass aggressivo per casi molto degradati",
+        "actions": "attiva denoise box3 | palette cleanup strict | prova repair ultra",
+    }));
+    plans
+}
+
 fn summarize_recommendation(row: &BatchSummaryRow) -> (String, String, String, String) {
     let priority = if row.quality_overall < 0.38 || row.diff_area > 0.32 {
         "critical"
@@ -895,6 +918,15 @@ fn write_review_pack(
         "source_count": rows.len(),
         "focus": "top_worst_only",
         "rows": selected,
+        "retry_plan_candidates": selected.iter().map(|row| serde_json::json!({
+            "relative_path": row.relative_path,
+            "baseline_quality": row.quality_overall,
+            "review_priority": row.review_priority,
+            "recommended_profile": row.recommended_profile,
+            "recommended_actions": row.recommended_actions,
+            "recommendation_reason": row.recommendation_reason,
+            "candidates": build_retry_plan_candidates(row),
+        })).collect::<Vec<_>>(),
     });
     let manifest_json = review_root.join("nasty-retropixel.review-pack.json");
     std::fs::write(

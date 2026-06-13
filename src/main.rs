@@ -1832,8 +1832,6 @@ pub fn process_image_debug_with_palette_image(
     debug_output_to_js(out)
 }
 
-}
-
 fn build_debug_report(
     config: &Config,
     palette_lock_size: usize,
