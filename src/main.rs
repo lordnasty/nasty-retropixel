@@ -1175,6 +1175,16 @@ pub fn process_image_debug_with_config(
     Ok((out.output_bytes, out.overlay_bytes, out.heatmap_bytes, out.report))
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+pub fn process_image_debug_with_palette_image_config(
+    input_bytes: &[u8],
+    palette_image_bytes: &[u8],
+    config: Config,
+) -> Result<(Vec<u8>, Vec<u8>, Vec<u8>, DebugReport)> {
+    let out = process_image_bytes_debug_common(input_bytes, Some(config), Some(palette_image_bytes))?;
+    Ok((out.output_bytes, out.overlay_bytes, out.heatmap_bytes, out.report))
+}
+
 #[cfg(target_arch = "wasm32")]
 fn debug_output_to_js(out: DebugOutput) -> std::result::Result<wasm_bindgen::JsValue, wasm_bindgen::JsValue> {
     let obj = Object::new();

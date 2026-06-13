@@ -87,6 +87,7 @@ Nota attuale:
 - la CLI, quando esporta `debug.json` in batch, genera anche un riepilogo ordinato per qualita' (`batch-summary.json/csv`) nella root debug;
 - la CLI supporta `--review-pack-top <n>` e crea una cartella `nasty-retropixel.review-pack/` con top worst output, debug json, overlay, heatmap e manifest;
 - il manifest del review pack CLI include anche `retry_plan_candidates` con baseline quality, priorita', preset consigliato e azioni operative per il retry manuale successivo;
+- la CLI supporta anche `--retry-review-top <n>` e crea una cartella `nasty-retropixel.retry-review/` con baseline copiato, retry reali valutati sui peggiori casi ed export solo dei miglioramenti effettivi;
 - la GUI batch preserva i path interni quando selezioni una cartella e scarichi lo ZIP.
 - il confronto varianti della GUI usa la heatmap del core quando disponibile e ordina i risultati mettendo in evidenza la variante consigliata.
 - la GUI salva in locale uno storico sintetico di output singoli e batch recenti, utile per riprendere il lavoro dopo il riavvio;
@@ -494,6 +495,7 @@ Supporta:
 - palette lock;
 - export debug JSON;
 - export debug overlay;
+- export debug heatmap;
 - scelta della directory debug.
 
 Opzioni principali:
@@ -511,7 +513,10 @@ Opzioni principali:
 - `--repair`
 - `--debug-json`
 - `--debug-overlay`
+- `--debug-heatmap`
 - `--debug-dir`
+- `--review-pack-top`
+- `--retry-review-top`
 
 ## Workflow Consigliati
 
